@@ -260,11 +260,13 @@ def db_init() -> None:
 
 def seed_items(conn: sqlite3.Connection) -> None:
     items = [
-        ("collectible_01", "Lucky Coin", 50, "collectible", "A coin that feels oddly warm."),
-        ("collectible_02", "Old Arcade Token", 120, "collectible", "Smells like pizza and neon."),
-        ("collectible_03", "Pocket Watch", 2500, "collectible", "It ticks even when it shouldn’t."),
-        ("collectible_04", "Mystery Key", 4000, "collectible", "It must open *something*."),
-        ("collectible_05", "Cursed Idol", 8000, "collectible", "Probably harmless. Probably."),
+        ("collectible_01", "Monkey", 50, "collectible", "A hard worker."),
+        ("collectible_02", "Le bean", 120, "collectible", "Works harder than the monkey."),
+        ("collectible_03", "Femboy", 2500, "collectible", "Gyatt."),
+        ("collectible_04", "Tomboy", 4000, "collectible", "will bully til nut."),
+        ("collectible_05", "Goth mommy", 8000, "collectible", "Will step on you."),
+	("collectible_06", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
+	("collectible_07", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
     ]
     for item_id, name, price, kind, desc in items:
         conn.execute("""
