@@ -265,8 +265,8 @@ def seed_items(conn: sqlite3.Connection) -> None:
         ("collectible_03", "Femboy", 2500, "collectible", "Gyatt."),
         ("collectible_04", "Tomboy", 4000, "collectible", "will bully til nut."),
         ("collectible_05", "Goth mommy", 8000, "collectible", "Will step on you."),
-	("collectible_06", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
-	("collectible_07", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
+        ("collectible_06", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
+        ("collectible_07", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
     ]
     for item_id, name, price, kind, desc in items:
         conn.execute("""
@@ -318,7 +318,7 @@ def achievements_enabled(conn: sqlite3.Connection, guild_id: int) -> bool:
 
 def set_achievements_enabled(conn: sqlite3.Connection, guild_id: int, enabled: bool) -> None:
     ensure_settings(conn, guild_id)
-    conn.execute("UPDATE guild_settings SET achievements_enabled=? WHERE guild_id=?", (1 if enabled else 0, str(guild_id)))
+    conn.execute("UPDATE guild_settings SET achievements_enabled=? WHERE guild_id=?", (1 if enabled else 0, str(guild_id),))
 
 def get_user(conn: sqlite3.Connection, guild_id: int, user_id: int) -> sqlite3.Row:
     ensure_user(conn, guild_id, user_id)
@@ -1231,6 +1231,9 @@ async def blackjack(interaction: discord.Interaction, bet: int):
 # ----------------------------
 # TEXAS HOLD'EM (HEADS-UP vs BOT)
 # ----------------------------
+import asyncio
+import secrets
+
 RANK_ORDER = {r: i for i, r in enumerate(["2","3","4","5","6","7","8","9","10","J","Q","K","A"], start=2)}
 
 def card_rank(c: str) -> str:
@@ -1328,6 +1331,7 @@ HE_BOT_RAISE_PCT_OF_POT = 40
 
 @dataclass
 class HoldemHU:
+    game_id: str
     ante: int
     deck: List[str]
     player_hole: List[str]
@@ -1342,39 +1346,26 @@ class HoldemHU:
     done: bool = False
     last_action: str = ""
 
-HE_HU_GAMES: Dict[Tuple[int, int], HoldemHU] = {}
+# Game storage (by id + by active user)
+HE_HU_GAMES_BY_ID: Dict[str, HoldemHU] = {}
+HE_HU_ACTIVE_BY_USER: Dict[Tuple[int, int], str] = {}
 
-class BetModal(discord.ui.Modal, title="Hold'em Bet / Raise"):
-    amount = discord.ui.TextInput(
-        label="Amount",
-        placeholder="Enter how many coins to bet/raise",
-        required=True,
-        max_length=10
-    )
+# Per-user async locks (prevents double-click / overlap issues)
+HE_HU_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
-    def __init__(self, view: "HoldemHUView"):
-        super().__init__()
-        self.view_ref = view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        view = self.view_ref
-        key = (interaction.guild.id, interaction.user.id)
-        game = HE_HU_GAMES.get(key)
-        if not game or game.done:
-            return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
-
-        try:
-            amt = int(str(self.amount).strip())
-        except ValueError:
-            return await interaction.response.send_message("Enter a valid number.", ephemeral=True)
-
-        await view._player_bet_or_raise(interaction, amt)
+def _he_lock_for(key: Tuple[int, int]) -> asyncio.Lock:
+    lock = HE_HU_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        HE_HU_LOCKS[key] = lock
+    return lock
 
 class HoldemHUView(discord.ui.View):
-    def __init__(self, guild_id: int, user_id: int, timeout: float = 90.0):
+    def __init__(self, guild_id: int, user_id: int, game_id: str, timeout: float = 90.0):
         super().__init__(timeout=timeout)
         self.guild_id = guild_id
         self.user_id = user_id
+        self.game_id = game_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -1383,7 +1374,18 @@ class HoldemHUView(discord.ui.View):
         return True
 
     async def on_timeout(self) -> None:
-        HE_HU_GAMES.pop((self.guild_id, self.user_id), None)
+        key = (self.guild_id, self.user_id)
+        active_id = HE_HU_ACTIVE_BY_USER.get(key)
+        if active_id == self.game_id:
+            HE_HU_ACTIVE_BY_USER.pop(key, None)
+        HE_HU_GAMES_BY_ID.pop(self.game_id, None)
+
+    async def _get_game_or_reply(self, interaction: discord.Interaction) -> Optional[HoldemHU]:
+        game = HE_HU_GAMES_BY_ID.get(self.game_id)
+        if not game or game.done:
+            await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
+            return None
+        return game
 
     def _render(self, game: HoldemHU, reveal_bot: bool = False) -> discord.Embed:
         comm = _community_for_stage(game.full_board, game.stage)
@@ -1464,7 +1466,13 @@ class HoldemHUView(discord.ui.View):
             conn.commit()
 
         game.done = True
-        HE_HU_GAMES.pop(key, None)
+
+        # Remove only if this exact game is still active for the user
+        active_id = HE_HU_ACTIVE_BY_USER.get(key)
+        if active_id == game.game_id:
+            HE_HU_ACTIVE_BY_USER.pop(key, None)
+        HE_HU_GAMES_BY_ID.pop(game.game_id, None)
+
         self.clear_items()
 
         embed = self._render(game, reveal_bot=True)
@@ -1532,67 +1540,96 @@ class HoldemHUView(discord.ui.View):
 
     async def _player_bet_or_raise(self, interaction: discord.Interaction, amount: int):
         key = (interaction.guild.id, interaction.user.id)
-        game = HE_HU_GAMES.get(key)
-        if not game or game.done:
-            return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
+        async with _he_lock_for(key):
+            game = HE_HU_GAMES_BY_ID.get(self.game_id)
+            if not game or game.done:
+                return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
 
-        if amount <= 0:
-            return await interaction.response.send_message("Bet must be positive.", ephemeral=True)
+            if amount <= 0:
+                return await interaction.response.send_message("Bet must be positive.", ephemeral=True)
 
-        total = game.to_call_player + amount
+            total = game.to_call_player + amount
 
-        ok = await self._safe_wallet_delta(interaction.guild.id, interaction.user.id, -total)
-        if not ok:
-            return await interaction.response.send_message("You don't have enough coins for that bet/raise.", ephemeral=True)
+            ok = await self._safe_wallet_delta(interaction.guild.id, interaction.user.id, -total)
+            if not ok:
+                return await interaction.response.send_message("You don't have enough coins for that bet/raise.", ephemeral=True)
 
-        game.pot += total
-        game.invested_player += total
+            game.pot += total
+            game.invested_player += total
 
-        game.to_call_bot = amount
-        game.to_call_player = 0
-        game.last_action = f"You bet/raised **{total:,}** (raise amount **{amount:,}**)."
+            game.to_call_bot = amount
+            game.to_call_player = 0
+            game.last_action = f"You bet/raised **{total:,}** (raise amount **{amount:,}**)."
 
-        await self._bot_act(interaction, game)
+            await self._bot_act(interaction, game)
 
     @discord.ui.button(label="Check / Call", style=discord.ButtonStyle.success)
     async def check_call(self, interaction: discord.Interaction, _: discord.ui.Button):
         key = (interaction.guild.id, interaction.user.id)
-        game = HE_HU_GAMES.get(key)
-        if not game or game.done:
-            return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
+        async with _he_lock_for(key):
+            game = await self._get_game_or_reply(interaction)
+            if not game:
+                return
 
-        if game.to_call_player > 0:
-            need = game.to_call_player
-            ok = await self._safe_wallet_delta(interaction.guild.id, interaction.user.id, -need)
-            if not ok:
-                return await interaction.response.send_message("You don't have enough coins to call.", ephemeral=True)
+            if game.to_call_player > 0:
+                need = game.to_call_player
+                ok = await self._safe_wallet_delta(interaction.guild.id, interaction.user.id, -need)
+                if not ok:
+                    return await interaction.response.send_message("You don't have enough coins to call.", ephemeral=True)
 
-            game.pot += need
-            game.invested_player += need
-            game.last_action = f"You called **{need:,}**."
-            game.to_call_player = 0
-            game.to_call_bot = 0
-        else:
-            game.last_action = "You checked."
+                game.pot += need
+                game.invested_player += need
+                game.last_action = f"You called **{need:,}**."
+                game.to_call_player = 0
+                game.to_call_bot = 0
+            else:
+                game.last_action = "You checked."
 
-        await self._bot_act(interaction, game)
+            await self._bot_act(interaction, game)
 
     @discord.ui.button(label="Bet / Raise", style=discord.ButtonStyle.primary)
     async def bet_raise(self, interaction: discord.Interaction, _: discord.ui.Button):
         key = (interaction.guild.id, interaction.user.id)
-        game = HE_HU_GAMES.get(key)
-        if not game or game.done:
-            return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
-        await interaction.response.send_modal(BetModal(self))
+        async with _he_lock_for(key):
+            game = await self._get_game_or_reply(interaction)
+            if not game:
+                return
+            await interaction.response.send_modal(BetModal(self))
 
     @discord.ui.button(label="Fold", style=discord.ButtonStyle.danger)
     async def fold(self, interaction: discord.Interaction, _: discord.ui.Button):
         key = (interaction.guild.id, interaction.user.id)
-        game = HE_HU_GAMES.get(key)
+        async with _he_lock_for(key):
+            game = await self._get_game_or_reply(interaction)
+            if not game:
+                return
+            game.last_action = "You folded."
+            await self._finish(interaction, game, False, "You folded.")
+
+class BetModal(discord.ui.Modal, title="Hold'em Bet / Raise"):
+    amount = discord.ui.TextInput(
+        label="Amount",
+        placeholder="Enter how many coins to bet/raise",
+        required=True,
+        max_length=10
+    )
+
+    def __init__(self, view: HoldemHUView):
+        super().__init__()
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = self.view_ref
+        game = HE_HU_GAMES_BY_ID.get(view.game_id)
         if not game or game.done:
             return await interaction.response.send_message("No active Hold'em game.", ephemeral=True)
-        game.last_action = "You folded."
-        await self._finish(interaction, game, False, "You folded.")
+
+        try:
+            amt = int(str(self.amount).strip())
+        except ValueError:
+            return await interaction.response.send_message("Enter a valid number.", ephemeral=True)
+
+        await view._player_bet_or_raise(interaction, amt)
 
 @bot.tree.command(name="holdem", description="Play Texas Hold'em heads-up vs a bot (buttons: check/call, bet/raise, fold).")
 @app_commands.describe(ante="Ante to start (both you and bot put this in the pot).")
@@ -1608,8 +1645,15 @@ async def holdem(interaction: discord.Interaction, ante: int):
         )
 
     key = (interaction.guild.id, interaction.user.id)
-    if key in HE_HU_GAMES:
-        return await interaction.response.send_message("You already have an active Hold'em game.", ephemeral=True)
+
+    # Clean up stale mapping if it exists
+    active_id = HE_HU_ACTIVE_BY_USER.get(key)
+    if active_id:
+        g = HE_HU_GAMES_BY_ID.get(active_id)
+        if g and not g.done:
+            return await interaction.response.send_message("You already have an active Hold'em game.", ephemeral=True)
+        HE_HU_ACTIVE_BY_USER.pop(key, None)
+        HE_HU_GAMES_BY_ID.pop(active_id, None)
 
     with db_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1625,7 +1669,10 @@ async def holdem(interaction: discord.Interaction, ante: int):
     bot_hole = [draw_card(deck), draw_card(deck)]
     full_board = [draw_card(deck) for _ in range(5)]
 
+    game_id = secrets.token_hex(8)
+
     game = HoldemHU(
+        game_id=game_id,
         ante=ante,
         deck=deck,
         player_hole=player_hole,
@@ -1640,9 +1687,11 @@ async def holdem(interaction: discord.Interaction, ante: int):
         done=False,
         last_action=f"Both anted **{ante:,}**. Your move."
     )
-    HE_HU_GAMES[key] = game
 
-    view = HoldemHUView(interaction.guild.id, interaction.user.id)
+    HE_HU_GAMES_BY_ID[game_id] = game
+    HE_HU_ACTIVE_BY_USER[key] = game_id
+
+    view = HoldemHUView(interaction.guild.id, interaction.user.id, game_id=game_id)
     await interaction.response.send_message(embed=view._render(game, reveal_bot=False), view=view)
 
 # ----------------------------
