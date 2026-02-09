@@ -38,15 +38,10 @@ STREAK_BONUS = {3: 100, 7: 250, 14: 500, 30: 1500}
 MIN_BET = 10
 MAX_BET = 100_000
 
-# Beg config
-BEG_COOLDOWN_SECONDS = 60
-BEG_LUCK_CHANCE = 20  # 1/20
-BEG_PAYOUT_LUCKY = 50
-BEG_PAYOUT_BONUS = 100
 
 # Roulette (keep casino-like, not OP)
 STRAIGHT_UP_RETURN_MULT = 36  # total return (profit 35:1)
-COLOR_RETURN_MULT = 2         # total return (profit 1:1)
+COLOR_RETURN_MULT = 3         # total return (profit 1:1)
 
 # Optional: make losses sting more (0 disables)
 ROULETTE_LOSS_FEE_PCT = 5     # extra % of bet deducted on losses only
@@ -609,9 +604,13 @@ async def balance(interaction: discord.Interaction, user: Optional[discord.Membe
     ))
 
 # ----------------------------
-# /BEG (your requested behavior)
+# /BEG (new rules: only if <10 coins, 1 hour cooldown, +50)
 # ----------------------------
-@bot.tree.command(name="beg", description="Beg for coins (1 min cooldown).")
+BEG_COOLDOWN_SECONDS = 60 * 60  # 1 hour
+BEG_MIN_WALLET_ALLOWED = 10     # must be strictly less than this
+BEG_PAYOUT = 50
+
+@bot.tree.command(name="beg", description="Beg for coins (only if you have <10 coins). 1 hour cooldown.")
 async def beg(interaction: discord.Interaction):
     guild_err = require_guild(interaction)
     if guild_err:
@@ -623,106 +622,53 @@ async def beg(interaction: discord.Interaction):
         conn.execute("BEGIN IMMEDIATE")
         row = get_user(conn, interaction.guild.id, interaction.user.id)
 
+        wallet = int(row["wallet"])
         last = int(row["last_beg"])
-        ready = int(row["beg_bonus_ready"])  # 1 = primed bonus (does NOT stack)
 
-        remaining = BEG_COOLDOWN_SECONDS - (now - last)
-        if remaining > 0:
+        # Must be under 10 coins to beg
+        if wallet >= BEG_MIN_WALLET_ALLOWED:
             conn.rollback()
             return await interaction.response.send_message(
                 embed=discord.Embed(
-                    title="Too soon",
-                    description=f"Try begging again in **{remaining}s**."
+                    title="Beg",
+                    description="You have enough, play for more coins."
                 ),
                 ephemeral=True
             )
 
-        # Determine payout + message
-        if ready == 1:
-            payout = BEG_PAYOUT_BONUS
-            msg = "No more begging for you bucko"
-            set_beg_bonus_ready(conn, interaction.guild.id, interaction.user.id, False)  # consume bonus (no stacking)
-        else:
-            if random.randint(1, BEG_LUCK_CHANCE) == 1:
-                payout = BEG_PAYOUT_LUCKY
-                msg = "Here my loyal follower, grovel and i may give more coin"
-                set_beg_bonus_ready(conn, interaction.guild.id, interaction.user.id, True)  # arm bonus for next beg
-            else:
-                payout = 0
-                msg = "The bot stares at you in silence. No coins."
-
-        set_last_beg(conn, interaction.guild.id, interaction.user.id, now)
-
-        if payout:
-            new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, payout)
-        else:
-            new_wallet = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
-
-        conn.commit()
-
-    desc = f"{msg}\n\nYou received **{payout:,}** coins.\nBalance: **{new_wallet:,}**"
-    await interaction.response.send_message(embed=discord.Embed(title="Beg", description=desc))
-
-@bot.tree.command(name="daily", description="Claim your daily coins (streaks enabled).")
-async def daily(interaction: discord.Interaction):
-    guild_err = require_guild(interaction)
-    if guild_err:
-        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
-
-    now = int(time.time())
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        row = get_user(conn, interaction.guild.id, interaction.user.id)
-        last = int(row["last_daily"])
-        streak = int(row["daily_streak"])
-
-        remaining = DAILY_COOLDOWN_SECONDS - (now - last)
+        # Cooldown check
+        remaining = BEG_COOLDOWN_SECONDS - (now - last)
         if remaining > 0:
-            h = remaining // 3600
-            m = (remaining % 3600) // 60
-            s = remaining % 60
+            mins = remaining // 60
+            secs = remaining % 60
             conn.rollback()
             return await interaction.response.send_message(
-                embed=discord.Embed(title="Daily already claimed", description=f"Try again in **{h}h {m}m {s}s**."),
+                embed=discord.Embed(
+                    title="Beg",
+                    description=(
+                        f"**HAHA!** You're **super greedy**.\n"
+                        f"\"I only have so many coins to give, be more grateful and do better in the games.\" \n\n"
+                        f"Try again in **{mins}m {secs}s**."
+                    )
+                ),
                 ephemeral=True
             )
 
-        if last == 0:
-            streak = 1
-        else:
-            streak = (streak + 1) if (now - last) <= DAILY_STREAK_GRACE_SECONDS else 1
+        # Pay out
+        set_last_beg(conn, interaction.guild.id, interaction.user.id, now)
+        new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, BEG_PAYOUT)
 
-        bonus = STREAK_BONUS.get(streak, 0)
-        payout = DAILY_AMOUNT + bonus
-
-        new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, payout)
-        set_last_daily(conn, interaction.guild.id, interaction.user.id, now)
-        set_daily_streak(conn, interaction.guild.id, interaction.user.id, streak)
-
-        newly = []
-        if achievements_enabled(conn, interaction.guild.id):
-            r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_daily")
-            if r is not None:
-                update_wallet(conn, interaction.guild.id, interaction.user.id, r)
-                newly.append(("First Daily", r))
-            if streak >= 7:
-                r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "streak_7")
-                if r is not None:
-                    update_wallet(conn, interaction.guild.id, interaction.user.id, r)
-                    newly.append(("7-Day Streak", r))
+        # (Optional) if your DB still has beg_bonus_ready, keep it clean:
+        set_beg_bonus_ready(conn, interaction.guild.id, interaction.user.id, False)
 
         conn.commit()
 
-    desc = (
-        f"You received **{payout:,}** coins."
-        + (f" (**{DAILY_AMOUNT:,}** base + **{bonus:,}** streak bonus**)" if bonus else "")
-        + f"\nStreak: **{streak} day(s)**"
-        + f"\nNew balance: **{new_wallet:,}** coins."
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Beg",
+            description=f"Yes, grovel for coins\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
+        )
     )
-    if newly:
-        desc += "\n\n🏆 **Achievements unlocked:**\n" + "\n".join([f"• {n} (+{r:,})" for n, r in newly])
-    await interaction.response.send_message(embed=discord.Embed(title="Daily claimed!", description=desc))
-
 # ----------------------------
 # ROULETTE
 # ----------------------------
