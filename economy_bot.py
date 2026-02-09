@@ -1,5 +1,6 @@
 # economy_bot.py
 # Discord economy bot (Python): /daily (streaks), /balance,
+# /beg (only if <10 coins, 1 hour cooldown, +50),
 # /roulette (color/number, AMERICAN),
 # /slots, /blackjack (Hit/Stand/Double/Surrender, 3:2 natural),
 # /holdem (simple heads-up vs bot),
@@ -37,7 +38,6 @@ STREAK_BONUS = {3: 100, 7: 250, 14: 500, 30: 1500}
 
 MIN_BET = 10
 MAX_BET = 100_000
-
 
 # Roulette (keep casino-like, not OP)
 STRAIGHT_UP_RETURN_MULT = 36  # total return (profit 35:1)
@@ -604,7 +604,82 @@ async def balance(interaction: discord.Interaction, user: Optional[discord.Membe
     ))
 
 # ----------------------------
-# /BEG (new rules: only if <10 coins, 1 hour cooldown, +50)
+# /DAILY (streaks + bonuses)
+# ----------------------------
+@bot.tree.command(name="daily", description="Claim your daily coins (streaks + bonuses).")
+async def daily(interaction: discord.Interaction):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    now = int(time.time())
+
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = get_user(conn, interaction.guild.id, interaction.user.id)
+
+        last = int(row["last_daily"])
+        streak = int(row["daily_streak"])
+
+        if last > 0 and (now - last) < DAILY_COOLDOWN_SECONDS:
+            remaining = DAILY_COOLDOWN_SECONDS - (now - last)
+            hrs = remaining // 3600
+            mins = (remaining % 3600) // 60
+            secs = remaining % 60
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Daily",
+                    description=f"You're still on cooldown. Try again in **{hrs}h {mins}m {secs}s**."
+                ),
+                ephemeral=True
+            )
+
+        if last <= 0:
+            new_streak = 1
+        else:
+            gap = now - last
+            if gap <= DAILY_STREAK_GRACE_SECONDS:
+                new_streak = streak + 1 if streak > 0 else 1
+            else:
+                new_streak = 1
+
+        bonus = STREAK_BONUS.get(new_streak, 0)
+        payout = DAILY_AMOUNT + bonus
+
+        set_last_daily(conn, interaction.guild.id, interaction.user.id, now)
+        set_daily_streak(conn, interaction.guild.id, interaction.user.id, new_streak)
+        new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, payout)
+
+        newly = []
+        if achievements_enabled(conn, interaction.guild.id):
+            r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_daily")
+            if r is not None:
+                update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                newly.append(("First Daily", r))
+            if new_streak >= 7:
+                r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "streak_7")
+                if r is not None:
+                    update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                    newly.append(("7-Day Streak", r))
+
+        conn.commit()
+
+    desc = (
+        f"You claimed **{DAILY_AMOUNT:,}** coins.\n"
+        f"Streak: **{new_streak}** day(s)\n"
+    )
+    if bonus:
+        desc += f"Streak bonus: **+{bonus:,}**\n"
+    desc += f"\nTotal: **+{payout:,}**\nBalance: **{new_wallet:,}**"
+
+    if newly:
+        desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
+
+    await interaction.response.send_message(embed=discord.Embed(title="Daily", description=desc))
+
+# ----------------------------
+# /BEG (only if <10 coins, 1 hour cooldown, +50)
 # ----------------------------
 BEG_COOLDOWN_SECONDS = 60 * 60  # 1 hour
 BEG_MIN_WALLET_ALLOWED = 10     # must be strictly less than this
@@ -625,7 +700,6 @@ async def beg(interaction: discord.Interaction):
         wallet = int(row["wallet"])
         last = int(row["last_beg"])
 
-        # Must be under 10 coins to beg
         if wallet >= BEG_MIN_WALLET_ALLOWED:
             conn.rollback()
             return await interaction.response.send_message(
@@ -636,7 +710,6 @@ async def beg(interaction: discord.Interaction):
                 ephemeral=True
             )
 
-        # Cooldown check
         remaining = BEG_COOLDOWN_SECONDS - (now - last)
         if remaining > 0:
             mins = remaining // 60
@@ -654,13 +727,9 @@ async def beg(interaction: discord.Interaction):
                 ephemeral=True
             )
 
-        # Pay out
         set_last_beg(conn, interaction.guild.id, interaction.user.id, now)
         new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, BEG_PAYOUT)
-
-        # (Optional) if your DB still has beg_bonus_ready, keep it clean:
         set_beg_bonus_ready(conn, interaction.guild.id, interaction.user.id, False)
-
         conn.commit()
 
     await interaction.response.send_message(
@@ -669,6 +738,7 @@ async def beg(interaction: discord.Interaction):
             description=f"Yes, grovel for coins\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
         )
     )
+
 # ----------------------------
 # ROULETTE
 # ----------------------------
@@ -1292,11 +1362,8 @@ class HoldemHU:
     done: bool = False
     last_action: str = ""
 
-# Game storage (by id + by active user)
 HE_HU_GAMES_BY_ID: Dict[str, HoldemHU] = {}
 HE_HU_ACTIVE_BY_USER: Dict[Tuple[int, int], str] = {}
-
-# Per-user async locks (prevents double-click / overlap issues)
 HE_HU_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
 def _he_lock_for(key: Tuple[int, int]) -> asyncio.Lock:
@@ -1413,7 +1480,6 @@ class HoldemHUView(discord.ui.View):
 
         game.done = True
 
-        # Remove only if this exact game is still active for the user
         active_id = HE_HU_ACTIVE_BY_USER.get(key)
         if active_id == game.game_id:
             HE_HU_ACTIVE_BY_USER.pop(key, None)
@@ -1535,8 +1601,7 @@ class HoldemHUView(discord.ui.View):
 
     @discord.ui.button(label="Bet / Raise", style=discord.ButtonStyle.primary)
     async def bet_raise(self, interaction: discord.Interaction, _: discord.ui.Button):
-        key = (interaction.guild.id, interaction.user.id)
-        async with _he_lock_for(key):
+        async with _he_lock_for((interaction.guild.id, interaction.user.id)):
             game = await self._get_game_or_reply(interaction)
             if not game:
                 return
@@ -1544,8 +1609,7 @@ class HoldemHUView(discord.ui.View):
 
     @discord.ui.button(label="Fold", style=discord.ButtonStyle.danger)
     async def fold(self, interaction: discord.Interaction, _: discord.ui.Button):
-        key = (interaction.guild.id, interaction.user.id)
-        async with _he_lock_for(key):
+        async with _he_lock_for((interaction.guild.id, interaction.user.id)):
             game = await self._get_game_or_reply(interaction)
             if not game:
                 return
@@ -1592,7 +1656,6 @@ async def holdem(interaction: discord.Interaction, ante: int):
 
     key = (interaction.guild.id, interaction.user.id)
 
-    # Clean up stale mapping if it exists
     active_id = HE_HU_ACTIVE_BY_USER.get(key)
     if active_id:
         g = HE_HU_GAMES_BY_ID.get(active_id)
