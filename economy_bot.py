@@ -1517,6 +1517,11 @@ class HoldemHUView(discord.ui.View):
 
         return embed
 
+    def _get_player_wallet(self, guild_id: int, user_id: int) -> int:
+        with db_connect() as conn:
+            row = get_user(conn, guild_id, user_id)
+            return int(row["wallet"])
+
     async def _safe_wallet_delta(self, guild_id: int, user_id: int, delta: int) -> bool:
         with db_connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1622,17 +1627,35 @@ class HoldemHUView(discord.ui.View):
             game.last_action = "Bot checked."
 
         elif decision == "raise":
+            # FIX: Bot cannot raise more than the player can actually cover (prevents forced folds)
+            player_wallet = self._get_player_wallet(interaction.guild.id, interaction.user.id)
+
             base_pot = max(1, game.pot)
             raise_amt = max(game.ante, (base_pot * HE_BOT_RAISE_PCT_OF_POT) // 100)
             raise_amt = min(raise_amt, MAX_BET)
-            total = game.to_call_bot + raise_amt
 
-            game.pot += total
-            game.invested_bot += total
-            game.to_call_bot = 0
+            # Cap raise to what the player can pay right now
+            raise_amt = min(raise_amt, max(0, player_wallet))
 
-            game.to_call_player = raise_amt
-            game.last_action = f"Bot raised. You must call **{raise_amt:,}** or fold."
+            # If player has 0, raising is impossible; fallback to call/check
+            if raise_amt <= 0:
+                if game.to_call_bot > 0:
+                    game.pot += game.to_call_bot
+                    game.invested_bot += game.to_call_bot
+                    game.last_action = f"Bot called **{game.to_call_bot:,}**."
+                    game.to_call_bot = 0
+                    game.to_call_player = 0
+                else:
+                    game.last_action = "Bot checked."
+            else:
+                total = game.to_call_bot + raise_amt
+
+                game.pot += total
+                game.invested_bot += total
+                game.to_call_bot = 0
+
+                game.to_call_player = raise_amt
+                game.last_action = f"Bot raised. You must call **{raise_amt:,}** or fold."
 
         if game.to_call_player == 0 and game.to_call_bot == 0:
             if game.stage < 3:
