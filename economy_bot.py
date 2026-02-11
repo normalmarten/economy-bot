@@ -993,11 +993,11 @@ async def slots(interaction: discord.Interaction, bet: int):
 # ----------------------------
 # BLACKJACK (double + surrender, 3:2 naturals)
 # ----------------------------
-# Requires elsewhere in your file:
-# - import asyncio (this section imports it too; harmless if duplicated)
-# - BJ_* config constants already used below (BJ_ALLOW_DOUBLE, BJ_ALLOW_SURRENDER, etc.)
-# - db_connect(), get_user(), update_wallet(), achievements_enabled(), unlock_achievement(), apply_blackjack_stats()
-# - require_guild(), _validate_bet()
+# Drop-in replacement for your entire Blackjack section.
+# This version fixes:
+# - “No active game” from double-click/lag races (per-user asyncio.Lock)
+# - “Interaction Failed” deadlocks (NEVER calls _finish while holding the lock)
+# - Safe editing whether from a button interaction or the /blackjack slash command
 
 import asyncio
 
@@ -1030,13 +1030,9 @@ def hand_value(cards: List[str]) -> int:
 
 def is_soft(cards: List[str]) -> bool:
     ranks = [c[:-1] for c in cards]
-    total = sum(card_value(r) for r in ranks)
-    aces = sum(1 for r in ranks if r == "A")
-    while total > 21 and aces > 0:
-        total -= 10
-        aces -= 1
     if "A" not in ranks:
         return False
+    # If treating an Ace as 11 keeps the hand <= 21, it's soft
     min_total = sum(1 if r == "A" else (10 if r in ("J", "Q", "K") else int(r)) for r in ranks)
     return (min_total + 10) <= 21
 
@@ -1057,8 +1053,8 @@ class BJGame:
 
 BJ_GAMES: Dict[Tuple[int, int], BJGame] = {}  # (guild_id, user_id) -> game
 
-# Per-user lock prevents double-click / lag / concurrent interaction races
-BJ_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}  # (guild_id, user_id) -> lock
+# Per-user lock prevents race conditions from double-clicks/lag
+BJ_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
 def _bj_lock(key: Tuple[int, int]) -> asyncio.Lock:
     lock = BJ_LOCKS.get(key)
@@ -1068,11 +1064,7 @@ def _bj_lock(key: Tuple[int, int]) -> asyncio.Lock:
     return lock
 
 async def _bj_edit(interaction: discord.Interaction, *, embed=None, view=None, content=None):
-    """
-    Safe edit for BOTH:
-    - component interactions: interaction.response.edit_message
-    - slash command follow-ups: interaction.edit_original_response
-    """
+    # Works both for button interactions and slash command follow-ups
     if interaction.response.is_done():
         return await interaction.edit_original_response(content=content, embed=embed, view=view)
     return await interaction.response.edit_message(content=content, embed=embed, view=view)
@@ -1156,10 +1148,21 @@ class BlackjackView(discord.ui.View):
             embed.description = desc
             await _bj_edit(interaction, embed=embed, view=self)
 
+    def _compute_outcome(self, bet: int, pv: int, dv: int) -> Tuple[str, int, int]:
+        if dv > 21 or pv > dv:
+            payout = frac_mult(bet, BJ_WIN_RETURN_MULT_NUM, BJ_WIN_RETURN_MULT_DEN)
+            return "win", payout, payout - bet
+        if pv == dv:
+            payout = frac_mult(bet, BJ_PUSH_RETURN_MULT_NUM, BJ_PUSH_RETURN_MULT_DEN)
+            return "push", payout, payout - bet
+        return "loss", 0, -bet
+
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, _: discord.ui.Button):
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
+
+        bust_net = None  # None or int
 
         async with lock:
             game = BJ_GAMES.get(key)
@@ -1170,10 +1173,12 @@ class BlackjackView(discord.ui.View):
             pv = hand_value(game.player)
 
             if pv > 21:
-                await self._finish(interaction, "loss", payout=0, net=-game.bet, note="You busted.")
-                return
+                bust_net = -game.bet
+            else:
+                return await _bj_edit(interaction, embed=self._render(game, reveal_dealer=False), view=self)
 
-            await _bj_edit(interaction, embed=self._render(game, reveal_dealer=False), view=self)
+        # IMPORTANT: finish OUTSIDE lock
+        await self._finish(interaction, "loss", payout=0, net=bust_net, note="You busted.")
 
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.success)
     async def stand(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1182,6 +1187,10 @@ class BlackjackView(discord.ui.View):
     async def _dealer_and_resolve(self, interaction: discord.Interaction):
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
+
+        outcome = None
+        payout = 0
+        net = 0
 
         async with lock:
             game = BJ_GAMES.get(key)
@@ -1200,17 +1209,10 @@ class BlackjackView(discord.ui.View):
 
             pv = hand_value(game.player)
             dv = hand_value(game.dealer)
+            outcome, payout, net = self._compute_outcome(game.bet, pv, dv)
 
-            if dv > 21 or pv > dv:
-                payout = frac_mult(game.bet, BJ_WIN_RETURN_MULT_NUM, BJ_WIN_RETURN_MULT_DEN)
-                net = payout - game.bet
-                await self._finish(interaction, "win", payout=payout, net=net)
-            elif pv == dv:
-                payout = frac_mult(game.bet, BJ_PUSH_RETURN_MULT_NUM, BJ_PUSH_RETURN_MULT_DEN)
-                net = payout - game.bet
-                await self._finish(interaction, "push", payout=payout, net=net)
-            else:
-                await self._finish(interaction, "loss", payout=0, net=-game.bet)
+        # finish OUTSIDE lock
+        await self._finish(interaction, outcome, payout=payout, net=net)
 
     @discord.ui.button(label="Double", style=discord.ButtonStyle.secondary)
     async def double(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1219,6 +1221,9 @@ class BlackjackView(discord.ui.View):
 
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
+
+        busted = False
+        busted_net = 0
 
         async with lock:
             game = BJ_GAMES.get(key)
@@ -1244,10 +1249,13 @@ class BlackjackView(discord.ui.View):
 
             pv = hand_value(game.player)
             if pv > 21:
-                await self._finish(interaction, "loss", payout=0, net=-game.bet, note="You doubled and busted.")
-                return
+                busted = True
+                busted_net = -game.bet
 
-        # resolve after releasing lock is fine; resolution re-locks internally
+        # finish/resolve OUTSIDE lock
+        if busted:
+            return await self._finish(interaction, "loss", payout=0, net=busted_net, note="You doubled and busted.")
+
         await self._dealer_and_resolve(interaction)
 
     @discord.ui.button(label="Surrender", style=discord.ButtonStyle.danger)
@@ -1257,6 +1265,10 @@ class BlackjackView(discord.ui.View):
 
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
+
+        ok = False
+        payout = 0
+        net = 0
 
         async with lock:
             game = BJ_GAMES.get(key)
@@ -1268,8 +1280,10 @@ class BlackjackView(discord.ui.View):
 
             payout = game.bet // 2
             net = payout - game.bet
+            ok = True
 
-        await self._finish(interaction, "loss", payout=payout, net=net, note="You surrendered.")
+        if ok:
+            await self._finish(interaction, "loss", payout=payout, net=net, note="You surrendered.")
 
 @bot.tree.command(name="blackjack", description="Play blackjack vs dealer (double/surrender, 3:2 naturals).")
 @app_commands.describe(bet="How many coins to bet")
@@ -1316,9 +1330,7 @@ async def blackjack(interaction: discord.Interaction, bet: int):
         view.clear_items()
 
         if dealer_bj:
-            payout = game.bet
-            net = 0
-            await view._finish(interaction, "push", payout=payout, net=net, note="Both have blackjack.")
+            await view._finish(interaction, "push", payout=game.bet, net=0, note="Both have blackjack.")
         else:
             profit = (game.bet * BJ_NATURAL_PROFIT_NUM) // BJ_NATURAL_PROFIT_DEN
             payout = game.bet + profit
@@ -1327,6 +1339,7 @@ async def blackjack(interaction: discord.Interaction, bet: int):
         return
 
     await interaction.response.send_message(embed=embed, view=view)
+
 
 # ----------------------------
 # TEXAS HOLD'EM (HEADS-UP vs BOT)
