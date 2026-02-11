@@ -1739,12 +1739,19 @@ async def shop(interaction: discord.Interaction):
         rows = conn.execute("SELECT item_id, name, price, description FROM items ORDER BY price ASC").fetchall()
 
     if not rows:
-        return await interaction.response.send_message(embed=discord.Embed(title="Shop", description="No items yet."))
+        return await interaction.response.send_message(
+            embed=discord.Embed(title="Shop", description="No items yet."),
+            ephemeral=True
+        )
 
     lines = []
     for r in rows:
         lines.append(f"**{r['item_id']}** — {r['name']} — **{int(r['price']):,}**\n_{r['description']}_")
-    await interaction.response.send_message(embed=discord.Embed(title="Shop (Collectibles)", description="\n\n".join(lines)))
+
+    await interaction.response.send_message(
+        embed=discord.Embed(title="Shop (Collectibles)", description="\n\n".join(lines)),
+        ephemeral=True
+    )
 
 @bot.tree.command(name="buy", description="Buy a collectible item from /shop.")
 @app_commands.describe(item_id="The item id", qty="How many to buy")
