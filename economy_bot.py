@@ -77,7 +77,7 @@ LOAN_GRACE_SECONDS = 24 * 60 * 60  # interest accrues daily; we compound on acce
 # ----------------------------
 INCOME_DAILY_PCT = 1                 # 1% of collectible portfolio value per day
 INCOME_DAILY_CAP = 250_000           # max coins per day from income (change this)
-INCOME_MIN_SECONDS = 24 * 60 * 60    # accrues in full-day chunks
+INCOME_DAY_SECONDS = 24 * 60 * 60    # accrues in full-day chunks
 
 # ----------------------------
 # ROULETTE HELPERS
@@ -1140,12 +1140,10 @@ async def slots(interaction: discord.Interaction, bet: int):
 # BLACKJACK (double + surrender, 3:2 naturals)
 # ----------------------------
 # Drop-in replacement for your entire Blackjack section.
-# This version fixes:
-# - “No active game” from double-click/lag races (per-user asyncio.Lock)
-# - “Interaction Failed” deadlocks (NEVER calls _finish while holding the lock)
-# - Safe editing whether from a button interaction or the /blackjack slash command
-
-import asyncio
+# Fixes:
+# - "Interaction Failed" by deferring immediately on button clicks
+# - "No active blackjack game" caused by missed ACK / race / lag
+# - Per-user asyncio.Lock prevents double-click races
 
 SUITS = ["♠", "♥", "♦", "♣"]
 RANKS = ["A"] + [str(i) for i in range(2, 11)] + ["J", "Q", "K"]
@@ -1178,8 +1176,9 @@ def is_soft(cards: List[str]) -> bool:
     ranks = [c[:-1] for c in cards]
     if "A" not in ranks:
         return False
-    # If treating an Ace as 11 keeps the hand <= 21, it's soft
+    # all-aces-as-1 total:
     min_total = sum(1 if r == "A" else (10 if r in ("J", "Q", "K") else int(r)) for r in ranks)
+    # if one ace can be 11 without busting, it's soft
     return (min_total + 10) <= 21
 
 def is_natural_blackjack(cards: List[str]) -> bool:
@@ -1198,8 +1197,6 @@ class BJGame:
     doubled: bool = False
 
 BJ_GAMES: Dict[Tuple[int, int], BJGame] = {}  # (guild_id, user_id) -> game
-
-# Per-user lock prevents race conditions from double-clicks/lag
 BJ_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
 def _bj_lock(key: Tuple[int, int]) -> asyncio.Lock:
@@ -1209,21 +1206,39 @@ def _bj_lock(key: Tuple[int, int]) -> asyncio.Lock:
         BJ_LOCKS[key] = lock
     return lock
 
-async def _bj_edit(interaction: discord.Interaction, *, embed=None, view=None, content=None):
-    # Works both for button interactions and slash command follow-ups
+async def _bj_defer_update(interaction: discord.Interaction):
+    # Always ACK fast to avoid "Interaction Failed"
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer()  # acknowledges the button click (defer update)
+        except Exception:
+            pass
+
+async def _bj_reply(interaction: discord.Interaction, content: str, *, ephemeral: bool = True):
+    # Works whether we already deferred or not
     if interaction.response.is_done():
+        return await interaction.followup.send(content, ephemeral=ephemeral)
+    return await interaction.response.send_message(content, ephemeral=ephemeral)
+
+async def _bj_edit(interaction: discord.Interaction, *, embed=None, view=None, content=None):
+    # After deferring, edit the original message
+    try:
         return await interaction.edit_original_response(content=content, embed=embed, view=view)
-    return await interaction.response.edit_message(content=content, embed=embed, view=view)
+    except Exception:
+        # Fallback: if edit_original_response fails, try response.edit_message
+        if not interaction.response.is_done():
+            return await interaction.response.edit_message(content=content, embed=embed, view=view)
+        raise
 
 class BlackjackView(discord.ui.View):
-    def __init__(self, guild_id: int, user_id: int, timeout: float = 75.0):
+    def __init__(self, guild_id: int, user_id: int, timeout: float = 90.0):
         super().__init__(timeout=timeout)
         self.guild_id = guild_id
         self.user_id = user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your blackjack game.", ephemeral=True)
+            await _bj_reply(interaction, "This isn't your blackjack game.", ephemeral=True)
             return False
         return True
 
@@ -1244,10 +1259,23 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(text=f"Bet: {game.bet:,} coins{extra}")
         return embed
 
+    def _compute_outcome(self, bet: int, pv: int, dv: int) -> Tuple[str, int, int]:
+        if dv > 21 or pv > dv:
+            payout = frac_mult(bet, BJ_WIN_RETURN_MULT_NUM, BJ_WIN_RETURN_MULT_DEN)
+            return "win", payout, payout - bet
+        if pv == dv:
+            payout = frac_mult(bet, BJ_PUSH_RETURN_MULT_NUM, BJ_PUSH_RETURN_MULT_DEN)
+            return "push", payout, payout - bet
+        return "loss", 0, -bet
+
     async def _finish(self, interaction: discord.Interaction, outcome: str, payout: int, net: int, note: str = ""):
+        # Ensure ACK already happened (buttons), so edits won't "fail"
+        await _bj_defer_update(interaction)
+
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
 
+        # Compute + DB inside lock to keep state consistent
         async with lock:
             game = BJ_GAMES.get(key)
             if not game:
@@ -1255,6 +1283,7 @@ class BlackjackView(discord.ui.View):
 
             with db_connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+
                 if payout:
                     new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, payout)
                 else:
@@ -1274,74 +1303,38 @@ class BlackjackView(discord.ui.View):
                         if r is not None:
                             update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                             newly.append(("Double Trouble", r))
+
                 conn.commit()
 
             game.done = True
             BJ_GAMES.pop(key, None)
             BJ_LOCKS.pop(key, None)
 
-            self.clear_items()
-            embed = self._render(game, reveal_dealer=True)
+        # Render + edit OUTSIDE lock (keeps clicks snappy)
+        self.clear_items()
+        embed = self._render(game, reveal_dealer=True)
 
-            net_text = f"+{net:,}" if net >= 0 else f"{net:,}"
-            result_line = {"win": "✅ You win!", "loss": "❌ You lose.", "push": "➖ Push."}[outcome]
-            desc = f"{result_line} Net: **{net_text}**\nBalance: **{new_wallet:,}**"
-            if note:
-                desc = note + "\n" + desc
-            if newly:
-                desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
+        net_text = f"+{net:,}" if net >= 0 else f"{net:,}"
+        result_line = {"win": "✅ You win!", "loss": "❌ You lose.", "push": "➖ Push."}[outcome]
+        desc = f"{result_line} Net: **{net_text}**\nBalance: **{new_wallet:,}**"
+        if note:
+            desc = note + "\n" + desc
+        if newly:
+            desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
 
-            embed.description = desc
-            await _bj_edit(interaction, embed=embed, view=self)
-
-    def _compute_outcome(self, bet: int, pv: int, dv: int) -> Tuple[str, int, int]:
-        if dv > 21 or pv > dv:
-            payout = frac_mult(bet, BJ_WIN_RETURN_MULT_NUM, BJ_WIN_RETURN_MULT_DEN)
-            return "win", payout, payout - bet
-        if pv == dv:
-            payout = frac_mult(bet, BJ_PUSH_RETURN_MULT_NUM, BJ_PUSH_RETURN_MULT_DEN)
-            return "push", payout, payout - bet
-        return "loss", 0, -bet
-
-    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
-    async def hit(self, interaction: discord.Interaction, _: discord.ui.Button):
-        key = (interaction.guild.id, interaction.user.id)
-        lock = _bj_lock(key)
-
-        bust_net = None  # None or int
-
-        async with lock:
-            game = BJ_GAMES.get(key)
-            if not game or game.done:
-                return await interaction.response.send_message("No active blackjack game.", ephemeral=True)
-
-            game.player.append(draw_card(game.deck))
-            pv = hand_value(game.player)
-
-            if pv > 21:
-                bust_net = -game.bet
-            else:
-                return await _bj_edit(interaction, embed=self._render(game, reveal_dealer=False), view=self)
-
-        # IMPORTANT: finish OUTSIDE lock
-        await self._finish(interaction, "loss", payout=0, net=bust_net, note="You busted.")
-
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success)
-    async def stand(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._dealer_and_resolve(interaction)
+        embed.description = desc
+        await _bj_edit(interaction, embed=embed, view=self)
 
     async def _dealer_and_resolve(self, interaction: discord.Interaction):
+        await _bj_defer_update(interaction)
+
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
-
-        outcome = None
-        payout = 0
-        net = 0
 
         async with lock:
             game = BJ_GAMES.get(key)
             if not game or game.done:
-                return
+                return await _bj_reply(interaction, "No active blackjack game.", ephemeral=True)
 
             while True:
                 dv = hand_value(game.dealer)
@@ -1357,13 +1350,11 @@ class BlackjackView(discord.ui.View):
             dv = hand_value(game.dealer)
             outcome, payout, net = self._compute_outcome(game.bet, pv, dv)
 
-        # finish OUTSIDE lock
         await self._finish(interaction, outcome, payout=payout, net=net)
 
-    @discord.ui.button(label="Double", style=discord.ButtonStyle.secondary)
-    async def double(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not BJ_ALLOW_DOUBLE:
-            return await interaction.response.send_message("Doubling is disabled.", ephemeral=True)
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
+    async def hit(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await _bj_defer_update(interaction)
 
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
@@ -1374,18 +1365,54 @@ class BlackjackView(discord.ui.View):
         async with lock:
             game = BJ_GAMES.get(key)
             if not game or game.done:
-                return await interaction.response.send_message("No active blackjack game.", ephemeral=True)
+                return await _bj_reply(interaction, "No active blackjack game.", ephemeral=True)
+
+            game.player.append(draw_card(game.deck))
+            pv = hand_value(game.player)
+
+            if pv > 21:
+                busted = True
+                busted_net = -game.bet
+            else:
+                # quick edit, no DB
+                return await _bj_edit(interaction, embed=self._render(game, reveal_dealer=False), view=self)
+
+        # finish OUTSIDE lock
+        await self._finish(interaction, "loss", payout=0, net=busted_net, note="You busted.")
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.success)
+    async def stand(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._dealer_and_resolve(interaction)
+
+    @discord.ui.button(label="Double", style=discord.ButtonStyle.secondary)
+    async def double(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await _bj_defer_update(interaction)
+
+        if not BJ_ALLOW_DOUBLE:
+            return await _bj_reply(interaction, "Doubling is disabled.", ephemeral=True)
+
+        key = (interaction.guild.id, interaction.user.id)
+        lock = _bj_lock(key)
+
+        busted = False
+        busted_net = 0
+
+        async with lock:
+            game = BJ_GAMES.get(key)
+            if not game or game.done:
+                return await _bj_reply(interaction, "No active blackjack game.", ephemeral=True)
 
             if len(game.player) != 2 or game.doubled:
-                return await interaction.response.send_message("You can only double right after the deal.", ephemeral=True)
+                return await _bj_reply(interaction, "You can only double right after the deal.", ephemeral=True)
 
+            # Charge the extra bet (can be slow) BUT we already deferred so it's safe
             with db_connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = get_user(conn, interaction.guild.id, interaction.user.id)
                 wallet = int(row["wallet"])
                 if game.bet > wallet:
                     conn.rollback()
-                    return await interaction.response.send_message("Not enough coins to double.", ephemeral=True)
+                    return await _bj_reply(interaction, "Not enough coins to double.", ephemeral=True)
                 update_wallet(conn, interaction.guild.id, interaction.user.id, -game.bet)
                 conn.commit()
 
@@ -1398,7 +1425,6 @@ class BlackjackView(discord.ui.View):
                 busted = True
                 busted_net = -game.bet
 
-        # finish/resolve OUTSIDE lock
         if busted:
             return await self._finish(interaction, "loss", payout=0, net=busted_net, note="You doubled and busted.")
 
@@ -1406,30 +1432,26 @@ class BlackjackView(discord.ui.View):
 
     @discord.ui.button(label="Surrender", style=discord.ButtonStyle.danger)
     async def surrender(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await _bj_defer_update(interaction)
+
         if not BJ_ALLOW_SURRENDER:
-            return await interaction.response.send_message("Surrender is disabled.", ephemeral=True)
+            return await _bj_reply(interaction, "Surrender is disabled.", ephemeral=True)
 
         key = (interaction.guild.id, interaction.user.id)
         lock = _bj_lock(key)
 
-        ok = False
-        payout = 0
-        net = 0
-
         async with lock:
             game = BJ_GAMES.get(key)
             if not game or game.done:
-                return await interaction.response.send_message("No active blackjack game.", ephemeral=True)
+                return await _bj_reply(interaction, "No active blackjack game.", ephemeral=True)
 
             if len(game.player) != 2 or game.doubled:
-                return await interaction.response.send_message("You can only surrender right after the deal.", ephemeral=True)
+                return await _bj_reply(interaction, "You can only surrender right after the deal.", ephemeral=True)
 
             payout = game.bet // 2
             net = payout - game.bet
-            ok = True
 
-        if ok:
-            await self._finish(interaction, "loss", payout=payout, net=net, note="You surrendered.")
+        await self._finish(interaction, "loss", payout=payout, net=net, note="You surrendered.")
 
 @bot.tree.command(name="blackjack", description="Play blackjack vs dealer (double/surrender, 3:2 naturals).")
 @app_commands.describe(bet="How many coins to bet")
@@ -1469,10 +1491,12 @@ async def blackjack(interaction: discord.Interaction, bet: int):
     view = BlackjackView(interaction.guild.id, interaction.user.id)
     embed = view._render(game, reveal_dealer=False)
 
-    # Natural blackjack auto-resolve
+    # Send the game
+    await interaction.response.send_message(embed=embed, view=view)
+
+    # Natural blackjack auto-resolve AFTER sending (so no interaction timing issues)
     if is_natural_blackjack(game.player):
         dealer_bj = is_natural_blackjack(game.dealer)
-        await interaction.response.send_message(embed=embed, view=view)
         view.clear_items()
 
         if dealer_bj:
@@ -1482,11 +1506,6 @@ async def blackjack(interaction: discord.Interaction, bet: int):
             payout = game.bet + profit
             net = payout - game.bet
             await view._finish(interaction, "win", payout=payout, net=net, note="Natural blackjack! (3:2)")
-        return
-
-    await interaction.response.send_message(embed=embed, view=view)
-
-
 # ----------------------------
 # TEXAS HOLD'EM (HEADS-UP vs BOT)
 # ----------------------------
