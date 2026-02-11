@@ -73,6 +73,13 @@ LOAN_ORIGINATION_FEE_PCT = 10  # take 10% up front
 LOAN_GRACE_SECONDS = 24 * 60 * 60  # interest accrues daily; we compound on access
 
 # ----------------------------
+# PASSIVE INCOME (collectibles)
+# ----------------------------
+INCOME_DAILY_PCT = 1                 # 1% of collectible portfolio value per day
+INCOME_DAILY_CAP = 250_000           # max coins per day from income (change this)
+INCOME_MIN_SECONDS = 24 * 60 * 60    # accrues in full-day chunks
+
+# ----------------------------
 # ROULETTE HELPERS
 # ----------------------------
 RED_NUMBERS = {
@@ -122,6 +129,9 @@ def db_init() -> None:
             -- Beg
             last_beg INTEGER NOT NULL DEFAULT 0,
             beg_bonus_ready INTEGER NOT NULL DEFAULT 0,
+
+            -- Passive Income
+            last_income_claim INTEGER NOT NULL DEFAULT 0,
 
             -- Roulette stats
             plays      INTEGER NOT NULL DEFAULT 0,
@@ -247,6 +257,8 @@ def db_init() -> None:
             "he_profit": "INTEGER NOT NULL DEFAULT 0",
             "last_beg": "INTEGER NOT NULL DEFAULT 0",
             "beg_bonus_ready": "INTEGER NOT NULL DEFAULT 0",
+            "last_income_claim": "INTEGER NOT NULL DEFAULT 0",
+
         }
         for col, ddl in add_cols.items():
             if col not in existing_cols:
@@ -368,6 +380,41 @@ def set_beg_bonus_ready(conn: sqlite3.Connection, guild_id: int, user_id: int, r
         "UPDATE guild_users SET beg_bonus_ready=? WHERE guild_id=? AND user_id=?",
         (1 if ready else 0, str(guild_id), str(user_id))
     )
+
+def set_last_income_claim(conn: sqlite3.Connection, guild_id: int, user_id: int, ts: int) -> None:
+    ensure_user(conn, guild_id, user_id)
+    conn.execute(
+        "UPDATE guild_users SET last_income_claim=? WHERE guild_id=? AND user_id=?",
+        (ts, str(guild_id), str(user_id))
+    )
+
+def compute_income_due(conn: sqlite3.Connection, guild_id: int, user_id: int, now: int) -> Tuple[int, int, int, int]:
+    """
+    Returns (days_elapsed, total_collectible_value, daily_income_capped, income_due)
+    Accrues in full-day chunks since last_income_claim. Daily payout is capped.
+    """
+    row = get_user(conn, guild_id, user_id)
+    last = int(row["last_income_claim"])
+
+    portfolio = conn.execute("""
+        SELECT COALESCE(SUM(it.price * i.qty), 0) AS total
+        FROM inventory i
+        JOIN items it ON it.item_id = i.item_id
+        WHERE i.guild_id=? AND i.user_id=? AND i.qty > 0 AND it.kind='collectible'
+    """, (str(guild_id), str(user_id))).fetchone()
+
+    total_value = int(portfolio["total"] or 0)
+    daily_raw = (total_value * INCOME_DAILY_PCT) // 100
+    daily_capped = min(daily_raw, INCOME_DAILY_CAP)
+
+    # If never started, no backpay
+    if last <= 0:
+        return (0, total_value, daily_capped, 0)
+
+    elapsed = now - last
+    days = max(0, elapsed // INCOME_DAY_SECONDS)
+    due = daily_capped * days if days > 0 else 0
+    return (days, total_value, daily_capped, due)
 
 def apply_roulette_stats(conn: sqlite3.Connection, guild_id: int, user_id: int, bet: int, net: int) -> None:
     ensure_user(conn, guild_id, user_id)
@@ -626,6 +673,106 @@ async def balance(interaction: discord.Interaction, user: Optional[discord.Membe
         title="Balance",
         description=f"**{target.mention}** has **{wallet:,}** coins."
     ))
+income = app_commands.Group(name="income", description="Collectible passive income (1% per day, capped).")
+bot.tree.add_command(income)
+
+@income.command(name="status", description="See how much passive income you can claim.")
+async def income_status(interaction: discord.Interaction):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = get_user(conn, interaction.guild.id, interaction.user.id)
+
+        # initialize clock on first use (no backpay)
+        if int(row["last_income_claim"]) <= 0:
+            set_last_income_claim(conn, interaction.guild.id, interaction.user.id, now)
+            conn.commit()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Income Status",
+                    description=(
+                        "Income tracking started ✅\n"
+                        "Come back after **24 hours** to claim your first payout.\n\n"
+                        f"Rate: **{INCOME_DAILY_PCT}%/day** | Daily cap: **{INCOME_DAILY_CAP:,}**"
+                    )
+                ),
+                ephemeral=True
+            )
+
+        days, total_value, daily_capped, due = compute_income_due(conn, interaction.guild.id, interaction.user.id, now)
+        conn.commit()
+
+    raw_daily = (total_value * INCOME_DAILY_PCT) // 100
+    desc = (
+        f"Portfolio value: **{total_value:,}**\n"
+        f"Daily income (raw): **{raw_daily:,}**\n"
+        f"Daily income (capped): **{daily_capped:,}** / day\n"
+        f"Days accrued: **{days}**\n\n"
+        f"Claimable now: **{due:,}** coins"
+    )
+    await interaction.response.send_message(embed=discord.Embed(title="Income Status", description=desc), ephemeral=True)
+
+@income.command(name="claim", description="Claim your collectible passive income.")
+async def income_claim(interaction: discord.Interaction):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = get_user(conn, interaction.guild.id, interaction.user.id)
+
+        # initialize clock on first claim attempt (no backpay)
+        if int(row["last_income_claim"]) <= 0:
+            set_last_income_claim(conn, interaction.guild.id, interaction.user.id, now)
+            conn.commit()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Income Claim",
+                    description="Income tracking started ✅\nClaim again after **24 hours**."
+                ),
+                ephemeral=True
+            )
+
+        days, total_value, daily_capped, due = compute_income_due(conn, interaction.guild.id, interaction.user.id, now)
+
+        if due <= 0:
+            last = int(row["last_income_claim"])
+            remaining = INCOME_DAY_SECONDS - ((now - last) % INCOME_DAY_SECONDS)
+            hrs = remaining // 3600
+            mins = (remaining % 3600) // 60
+            secs = remaining % 60
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Income Claim",
+                    description=f"Nothing to claim yet. Next accrual in **{hrs}h {mins}m {secs}s**."
+                ),
+                ephemeral=True
+            )
+
+        new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, due)
+
+        # move timestamp forward by whole days to prevent double-claim
+        last = int(row["last_income_claim"])
+        new_last = last + (days * INCOME_DAY_SECONDS)
+        set_last_income_claim(conn, interaction.guild.id, interaction.user.id, new_last)
+
+        conn.commit()
+
+    desc = (
+        f"Claimed: **{due:,}** coins\n"
+        f"Days claimed: **{days}**\n"
+        f"Daily (capped): **{daily_capped:,}** / day\n"
+        f"Daily cap: **{INCOME_DAILY_CAP:,}**\n\n"
+        f"New balance: **{new_wallet:,}**"
+    )
+    await interaction.response.send_message(embed=discord.Embed(title="Income Claimed", description=desc))
 
 # ----------------------------
 # /DAILY (streaks + bonuses)
@@ -2196,6 +2343,114 @@ async def leaderboard(interaction: discord.Interaction, category: Optional[app_c
         title=f"Leaderboard — {metric_label}",
         description="\n".join(lines) + f"\n\nYour rank: **#{my_rank}**",
     ))
+
+gift = app_commands.Group(name="gift", description="Gift coins or items to another user.")
+bot.tree.add_command(gift)
+
+@gift.command(name="coins", description="Gift coins to another user.")
+@app_commands.describe(user="Who to gift to", amount="How many coins")
+async def gift_coins(interaction: discord.Interaction, user: discord.Member, amount: int):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    if user.bot:
+        return await interaction.response.send_message("You can't gift coins to bots.", ephemeral=True)
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message("You can't gift yourself.", ephemeral=True)
+    if amount <= 0:
+        return await interaction.response.send_message("Amount must be positive.", ephemeral=True)
+
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        sender = get_user(conn, interaction.guild.id, interaction.user.id)
+        bal = int(sender["wallet"])
+        if amount > bal:
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(title="Not enough coins", description=f"You have **{bal:,}** coins."),
+                ephemeral=True
+            )
+
+        update_wallet(conn, interaction.guild.id, interaction.user.id, -amount)
+        update_wallet(conn, interaction.guild.id, user.id, amount)
+        conn.commit()
+
+    await interaction.response.send_message(
+        embed=discord.Embed(title="Gift Sent", description=f"You gifted **{amount:,}** coins to {user.mention}.")
+    )
+
+@gift.command(name="item", description="Gift a collectible item to another user.")
+@app_commands.describe(user="Who to gift to", item_id="Item id to gift", qty="How many")
+async def gift_item(interaction: discord.Interaction, user: discord.Member, item_id: str, qty: int = 1):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    if user.bot:
+        return await interaction.response.send_message("You can't gift items to bots.", ephemeral=True)
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message("You can't gift yourself.", ephemeral=True)
+    if qty < 1 or qty > 99:
+        return await interaction.response.send_message("Qty must be 1–99.", ephemeral=True)
+
+    item_id = item_id.strip()
+
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        item = conn.execute("SELECT name, kind FROM items WHERE item_id=?", (item_id,)).fetchone()
+        if not item:
+            conn.rollback()
+            return await interaction.response.send_message("That item_id doesn't exist.", ephemeral=True)
+        if str(item["kind"]) != "collectible":
+            conn.rollback()
+            return await interaction.response.send_message("Only collectibles can be gifted.", ephemeral=True)
+
+        have = conn.execute("""
+            SELECT qty FROM inventory
+            WHERE guild_id=? AND user_id=? AND item_id=?
+        """, (str(interaction.guild.id), str(interaction.user.id), item_id)).fetchone()
+
+        have_qty = int(have["qty"]) if have else 0
+        if qty > have_qty:
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Not enough items",
+                    description=f"You only have **{have_qty}x** of `{item_id}`."
+                ),
+                ephemeral=True
+            )
+
+        # subtract from sender
+        conn.execute("""
+            UPDATE inventory SET qty = qty - ?
+            WHERE guild_id=? AND user_id=? AND item_id=?
+        """, (qty, str(interaction.guild.id), str(interaction.user.id), item_id))
+
+        # add to receiver
+        conn.execute("""
+            INSERT INTO inventory (guild_id, user_id, item_id, qty)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, item_id) DO UPDATE SET qty = qty + excluded.qty
+        """, (str(interaction.guild.id), str(user.id), item_id, qty))
+
+        # cleanup zero rows
+        conn.execute("""
+            DELETE FROM inventory
+            WHERE guild_id=? AND user_id=? AND item_id=? AND qty <= 0
+        """, (str(interaction.guild.id), str(interaction.user.id), item_id))
+
+        conn.commit()
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Gift Sent",
+            description=f"You gifted **{qty}x** **{item['name']}** (`{item_id}`) to {user.mention}."
+        )
+    )
+
 
 # ----------------------------
 # ADMIN COMMANDS
