@@ -71,6 +71,10 @@ LOAN_DAILY_INTEREST_PCT = 25   # 25% per day 😈
 LOAN_ORIGINATION_FEE_PCT = 10  # take 10% up front
 LOAN_GRACE_SECONDS = 24 * 60 * 60  # interest accrues daily; we compound on access
 
+# Achievements thresholds (new)
+ACH_HIGH_ROLLER_BET = 50_000
+ACH_MILLIONAIRE_WALLET = 1_000_000
+
 # ----------------------------
 # ROULETTE HELPERS
 # ----------------------------
@@ -98,7 +102,13 @@ def loss_fee(bet: int) -> int:
 # ----------------------------
 # DATABASE
 # ----------------------------
+def _ensure_db_dir() -> None:
+    d = os.path.dirname(DB_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
 def db_connect() -> sqlite3.Connection:
+    _ensure_db_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -107,6 +117,7 @@ def _colnames(conn: sqlite3.Connection, table: str) -> set:
     return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 def db_init() -> None:
+    _ensure_db_dir()
     with db_connect() as conn:
         conn.execute("""
         CREATE TABLE IF NOT EXISTS guild_users (
@@ -227,8 +238,8 @@ def db_init() -> None:
         """)
         conn.commit()
 
-        seed_items(conn)
-        seed_achievements(conn)
+        seed_items(conn)          # DO NOT EDIT COLLECTIBLES
+        seed_achievements(conn)   # safe: uses INSERT OR IGNORE
 
         # migrations (safe adds)
         existing_cols = _colnames(conn, "guild_users")
@@ -253,6 +264,7 @@ def db_init() -> None:
         conn.commit()
 
 def seed_items(conn: sqlite3.Connection) -> None:
+    # DO NOT EDIT COLLECTIBLES (per your request)
     items = [
         ("collectible_01", "Monkey", 50, "collectible", "A hard worker."),
         ("collectible_02", "Le bean", 120, "collectible", "Works harder than the monkey."),
@@ -284,8 +296,6 @@ def seed_items(conn: sqlite3.Connection) -> None:
         ("collectible_28", "Alt Girl", 800_000_000, "collectible", "you know it"),
         ("collectible_29", "First Date", 1_000_000_000, "collectible", "First date."),
         ("collectible_30", "An Actual Healthy Relationship With A Woman", 2_000_000_000_000, "collectible", "Who decided that."),
-
-
     ]
     for item_id, name, price, kind, desc in items:
         conn.execute("""
@@ -295,9 +305,12 @@ def seed_items(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 def seed_achievements(conn: sqlite3.Connection) -> None:
+    # Added a few more achievements (safe: INSERT OR IGNORE)
     ach = [
         ("first_daily", "First Daily", "Claim /daily for the first time.", 200),
         ("streak_7", "7-Day Streak", "Reach a 7-day daily streak.", 500),
+        ("streak_30", "30-Day Streak", "Reach a 30-day daily streak.", 1200),
+
         ("roulette_big", "Big Spin", "Win 10,000+ coins net on roulette in one spin.", 750),
 
         ("bj_blackjack", "Natural Blackjack", "Get a natural blackjack (A + 10).", 750),
@@ -310,6 +323,9 @@ def seed_achievements(conn: sqlite3.Connection) -> None:
         ("loan_paid", "Paid in Blood", "Fully repay a loan.", 500),
 
         ("holdem_win", "River King", "Win a hand of Texas Hold'em.", 600),
+
+        ("high_roller", "High Roller", f"Place a single bet of {ACH_HIGH_ROLLER_BET:,}+ coins.", 800),
+        ("millionaire", "Millionaire", f"Reach a wallet balance of {ACH_MILLIONAIRE_WALLET:,}+ coins.", 1500),
     ]
     for ach_id, name, desc, reward in ach:
         conn.execute("""
@@ -524,6 +540,28 @@ def list_user_achievements(conn: sqlite3.Connection, guild_id: int, user_id: int
         ORDER BY ua.unlocked_at DESC
     """, (str(guild_id), str(user_id))).fetchall()
 
+def maybe_unlock_common_achs(conn: sqlite3.Connection, guild_id: int, user_id: int, *,
+                            bet_amount: Optional[int] = None,
+                            wallet_after: Optional[int] = None) -> List[Tuple[str, int]]:
+    """Unlock common achievements used by multiple commands. Returns [(name, reward), ...]."""
+    newly: List[Tuple[str, int]] = []
+    if not achievements_enabled(conn, guild_id):
+        return newly
+
+    if bet_amount is not None and bet_amount >= ACH_HIGH_ROLLER_BET:
+        r = unlock_achievement(conn, guild_id, user_id, "high_roller")
+        if r is not None:
+            update_wallet(conn, guild_id, user_id, r)
+            newly.append(("High Roller", r))
+
+    if wallet_after is not None and wallet_after >= ACH_MILLIONAIRE_WALLET:
+        r = unlock_achievement(conn, guild_id, user_id, "millionaire")
+        if r is not None:
+            update_wallet(conn, guild_id, user_id, r)
+            newly.append(("Millionaire", r))
+
+    return newly
+
 # ----------------------------
 # LOANS
 # ----------------------------
@@ -575,6 +613,7 @@ def clear_loan(conn: sqlite3.Connection, guild_id: int, user_id: int) -> None:
 # BOT SETUP
 # ----------------------------
 intents = discord.Intents.default()
+intents.members = True  # helps leaderboard display names reliably
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def require_guild(interaction: discord.Interaction) -> Optional[discord.Embed]:
@@ -674,7 +713,7 @@ async def daily(interaction: discord.Interaction):
         set_daily_streak(conn, interaction.guild.id, interaction.user.id, new_streak)
         new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, payout)
 
-        newly = []
+        newly: List[Tuple[str, int]] = []
         if achievements_enabled(conn, interaction.guild.id):
             r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_daily")
             if r is not None:
@@ -685,6 +724,14 @@ async def daily(interaction: discord.Interaction):
                 if r is not None:
                     update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                     newly.append(("7-Day Streak", r))
+            if new_streak >= 30:
+                r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "streak_30")
+                if r is not None:
+                    update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                    newly.append(("30-Day Streak", r))
+
+        # common achievements (millionaire check)
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, wallet_after=new_wallet)
 
         conn.commit()
 
@@ -753,14 +800,16 @@ async def beg(interaction: discord.Interaction):
         set_last_beg(conn, interaction.guild.id, interaction.user.id, now)
         new_wallet = update_wallet(conn, interaction.guild.id, interaction.user.id, BEG_PAYOUT)
         set_beg_bonus_ready(conn, interaction.guild.id, interaction.user.id, False)
+
+        newly = maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, wallet_after=new_wallet)
+
         conn.commit()
 
-    await interaction.response.send_message(
-        embed=discord.Embed(
-            title="Beg",
-            description=f"Yes, grovel for coins\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
-        )
-    )
+    desc = f"Yes, grovel for coins\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
+    if newly:
+        desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
+
+    await interaction.response.send_message(embed=discord.Embed(title="Beg", description=desc))
 
 # ----------------------------
 # ROULETTE
@@ -812,12 +861,15 @@ async def roulette_color(interaction: discord.Interaction, bet: int, color: app_
         net = payout - bet - fee
         apply_roulette_stats(conn, interaction.guild.id, interaction.user.id, bet, net)
 
-        newly = []
+        newly: List[Tuple[str, int]] = []
         if achievements_enabled(conn, interaction.guild.id) and net >= 10_000:
             r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "roulette_big")
             if r is not None:
                 update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                 newly.append(("Big Spin", r))
+
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=bet, wallet_after=new_wallet)
+
         conn.commit()
 
     net_text = f"+{net:,}" if net >= 0 else f"{net:,}"
@@ -889,12 +941,15 @@ async def roulette_number(interaction: discord.Interaction, bet: int, pocket: st
         net = payout - bet - fee
         apply_roulette_stats(conn, interaction.guild.id, interaction.user.id, bet, net)
 
-        newly = []
+        newly: List[Tuple[str, int]] = []
         if achievements_enabled(conn, interaction.guild.id) and net >= 10_000:
             r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "roulette_big")
             if r is not None:
                 update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                 newly.append(("Big Spin", r))
+
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=bet, wallet_after=new_wallet)
+
         conn.commit()
 
     net_text = f"+{net:,}" if net >= 0 else f"{net:,}"
@@ -969,13 +1024,14 @@ async def slots(interaction: discord.Interaction, bet: int):
 
         apply_slots_stats(conn, interaction.guild.id, interaction.user.id, bet, net)
 
-        newly = []
-        if achievements_enabled(conn, interaction.guild.id):
-            if jackpot:
-                r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "slots_jackpot")
-                if r is not None:
-                    update_wallet(conn, interaction.guild.id, interaction.user.id, r)
-                    newly.append(("Jackpot", r))
+        newly: List[Tuple[str, int]] = []
+        if achievements_enabled(conn, interaction.guild.id) and jackpot:
+            r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "slots_jackpot")
+            if r is not None:
+                update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                newly.append(("Jackpot", r))
+
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=bet, wallet_after=new_wallet)
 
         conn.commit()
 
@@ -1075,6 +1131,13 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(text=f"Bet: {game.bet:,} coins{extra}")
         return embed
 
+    async def _edit_message(self, interaction: discord.Interaction, *, embed: discord.Embed, view: Optional[discord.ui.View]):
+        # IMPORTANT FIX: slash-command interactions may already have a response sent.
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=view)
+
     async def _finish(self, interaction: discord.Interaction, outcome: str, payout: int, net: int, note: str = ""):
         key = (interaction.guild.id, interaction.user.id)
         game = BJ_GAMES.get(key)
@@ -1090,7 +1153,7 @@ class BlackjackView(discord.ui.View):
 
             apply_blackjack_stats(conn, interaction.guild.id, interaction.user.id, game.bet, net, outcome)
 
-            newly = []
+            newly: List[Tuple[str, int]] = []
             if achievements_enabled(conn, interaction.guild.id):
                 if is_natural_blackjack(game.player):
                     r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "bj_blackjack")
@@ -1102,6 +1165,9 @@ class BlackjackView(discord.ui.View):
                     if r is not None:
                         update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                         newly.append(("Double Trouble", r))
+
+            newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=game.bet, wallet_after=new_wallet)
+
             conn.commit()
 
         game.done = True
@@ -1118,7 +1184,7 @@ class BlackjackView(discord.ui.View):
             desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
 
         embed.description = desc
-        await interaction.response.edit_message(embed=embed, view=self)
+        await self._edit_message(interaction, embed=embed, view=self)
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1241,6 +1307,9 @@ async def blackjack(interaction: discord.Interaction, bet: int):
             conn.rollback()
             return await interaction.response.send_message(embed=discord.Embed(title="Not enough coins", description=f"You have **{wallet:,}** coins."), ephemeral=True)
         update_wallet(conn, interaction.guild.id, interaction.user.id, -bet)
+
+        # high roller check uses bet amount (deduct happens here)
+        newly = maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=bet)
         conn.commit()
 
     deck = new_deck()
@@ -1252,6 +1321,7 @@ async def blackjack(interaction: discord.Interaction, bet: int):
 
     if is_natural_blackjack(game.player):
         dealer_bj = is_natural_blackjack(game.dealer)
+        # Send initial message, then resolve via _finish (fixed to edit original response safely)
         await interaction.response.send_message(embed=embed, view=view)
         view.clear_items()
         if dealer_bj:
@@ -1495,10 +1565,18 @@ class HoldemHUView(discord.ui.View):
         with db_connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             apply_holdem_stats(conn, interaction.guild.id, interaction.user.id, game.invested_player, net, won=(player_won is True))
+
+            newly: List[Tuple[str, int]] = []
             if (player_won is True) and achievements_enabled(conn, interaction.guild.id):
                 r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "holdem_win")
                 if r is not None:
                     update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                    newly.append(("River King", r))
+
+            # common achievements
+            wallet_after = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
+            newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=game.ante, wallet_after=wallet_after)
+
             conn.commit()
 
         game.done = True
@@ -1694,6 +1772,9 @@ async def holdem(interaction: discord.Interaction, ante: int):
             conn.rollback()
             return await interaction.response.send_message("You don't have enough coins to ante.", ephemeral=True)
         update_wallet(conn, interaction.guild.id, interaction.user.id, -ante)
+
+        # high roller check
+        newly = maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, bet_amount=ante)
         conn.commit()
 
     deck = new_deck()
@@ -1724,12 +1805,14 @@ async def holdem(interaction: discord.Interaction, ante: int):
     HE_HU_ACTIVE_BY_USER[key] = game_id
 
     view = HoldemHUView(interaction.guild.id, interaction.user.id, game_id=game_id)
-    await interaction.response.send_message(embed=view._render(game, reveal_bot=False), view=view)
+    embed = view._render(game, reveal_bot=False)
+    if newly:
+        embed.description = "🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
+    await interaction.response.send_message(embed=embed, view=view)
 
 # ----------------------------
 # SHOP / COLLECTIBLES
 # ----------------------------
-
 def add_to_inventory(conn: sqlite3.Connection, guild_id: int, user_id: int, item_id: str, qty: int = 1) -> None:
     conn.execute("""
         INSERT INTO inventory (guild_id, user_id, item_id, qty)
@@ -1737,7 +1820,6 @@ def add_to_inventory(conn: sqlite3.Connection, guild_id: int, user_id: int, item
         ON CONFLICT(guild_id, user_id, item_id)
         DO UPDATE SET qty = qty + excluded.qty
     """, (str(guild_id), str(user_id), item_id, qty))
-
 
 @bot.tree.command(name="shop", description="View collectible items you can buy.")
 async def shop(interaction: discord.Interaction):
@@ -1768,7 +1850,6 @@ async def shop(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.tree.command(name="buy", description="Buy a collectible item from the shop.")
 @app_commands.describe(item_id="The item_id from /shop", qty="How many to buy (default 1)")
@@ -1820,7 +1901,7 @@ async def buy(interaction: discord.Interaction, item_id: str, qty: Optional[int]
         update_wallet(conn, interaction.guild.id, interaction.user.id, -total)
         add_to_inventory(conn, interaction.guild.id, interaction.user.id, item_id, qty)
 
-        newly = []
+        newly: List[Tuple[str, int]] = []
         if achievements_enabled(conn, interaction.guild.id):
             r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_buy")
             if r is not None:
@@ -1828,6 +1909,8 @@ async def buy(interaction: discord.Interaction, item_id: str, qty: Optional[int]
                 newly.append(("First Purchase", r))
 
         new_wallet = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, wallet_after=new_wallet)
+
         conn.commit()
 
     desc = (
@@ -1843,7 +1926,6 @@ async def buy(interaction: discord.Interaction, item_id: str, qty: Optional[int]
         embed=discord.Embed(title="Purchase complete", description=desc),
         ephemeral=True
     )
-
 
 @bot.tree.command(name="inventory", description="See your collectible inventory.")
 @app_commands.describe(user="Optional: view someone else's inventory")
@@ -1884,6 +1966,7 @@ async def inventory(interaction: discord.Interaction, user: Optional[discord.Mem
         ),
         ephemeral=True
     )
+
 # ----------------------------
 # LOAN COMMANDS
 # ----------------------------
@@ -1918,12 +2001,15 @@ async def loan_take(interaction: discord.Interaction, amount: int):
         set_loan(conn, interaction.guild.id, interaction.user.id, principal=amount, balance=amount, now=now)
         update_wallet(conn, interaction.guild.id, interaction.user.id, receive)
 
-        newly = []
+        newly: List[Tuple[str, int]] = []
         if achievements_enabled(conn, interaction.guild.id):
             r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "loan_shark")
             if r is not None:
                 update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                 newly.append(("Loan Shark", r))
+
+        wallet_after = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
+        newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, wallet_after=wallet_after)
 
         conn.commit()
 
@@ -1994,12 +2080,16 @@ async def loan_repay(interaction: discord.Interaction, amount: int):
 
         if new_bal <= 0:
             clear_loan(conn, interaction.guild.id, interaction.user.id)
-            newly = []
+            newly: List[Tuple[str, int]] = []
             if achievements_enabled(conn, interaction.guild.id):
                 r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "loan_paid")
                 if r is not None:
                     update_wallet(conn, interaction.guild.id, interaction.user.id, r)
                     newly.append(("Paid in Blood", r))
+
+            wallet_after = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
+            newly += maybe_unlock_common_achs(conn, interaction.guild.id, interaction.user.id, wallet_after=wallet_after)
+
             conn.commit()
             desc = f"Paid **{pay:,}**. Loan is **fully repaid**."
             if newly:
