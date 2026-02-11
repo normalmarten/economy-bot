@@ -1736,85 +1736,31 @@ async def shop(interaction: discord.Interaction):
         return await interaction.response.send_message(embed=guild_err, ephemeral=True)
 
     with db_connect() as conn:
-        rows = conn.execute("SELECT item_id, name, price, description FROM items ORDER BY price ASC").fetchall()
+        rows = conn.execute(
+            "SELECT item_id, name, price, description FROM items ORDER BY price ASC"
+        ).fetchall()
 
     if not rows:
-        return await interaction.response.send_message(embed=discord.Embed(title="Shop", description="No items yet."))
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title="Shop",
+                description="No items yet."
+            ),
+            ephemeral=True
+        )
 
     lines = []
     for r in rows:
-        lines.append(f"**{r['item_id']}** — {r['name']} — **{int(r['price']):,}**\n_{r['description']}_")
-    await interaction.response.send_message(embed=discord.Embed(title="Shop (Collectibles)", description="\n\n".join(lines)))
+        lines.append(
+            f"**{r['item_id']}** — {r['name']} — **{int(r['price']):,}**\n_{r['description']}_"
+        )
 
-@bot.tree.command(name="buy", description="Buy a collectible item from /shop.")
-@app_commands.describe(item_id="The item id", qty="How many to buy")
-async def buy(interaction: discord.Interaction, item_id: str, qty: int = 1):
-    guild_err = require_guild(interaction)
-    if guild_err:
-        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+    embed = discord.Embed(
+        title="Shop (Collectibles)",
+        description="\n\n".join(lines)
+    )
 
-    if qty < 1 or qty > 99:
-        return await interaction.response.send_message(embed=discord.Embed(title="Invalid qty", description="Qty must be 1–99."), ephemeral=True)
-
-    item_id = item_id.strip()
-    with db_connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        item = conn.execute("SELECT name, price FROM items WHERE item_id=?", (item_id,)).fetchone()
-        if not item:
-            conn.rollback()
-            return await interaction.response.send_message(embed=discord.Embed(title="Not found", description="That item_id doesn't exist."), ephemeral=True)
-
-        cost = int(item["price"]) * qty
-        row = get_user(conn, interaction.guild.id, interaction.user.id)
-        wallet = int(row["wallet"])
-        if cost > wallet:
-            conn.rollback()
-            return await interaction.response.send_message(embed=discord.Embed(title="Not enough coins", description=f"Cost: **{cost:,}**. You have **{wallet:,}**."), ephemeral=True)
-
-        update_wallet(conn, interaction.guild.id, interaction.user.id, -cost)
-
-        conn.execute("""
-            INSERT INTO inventory (guild_id, user_id, item_id, qty)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id, item_id) DO UPDATE SET qty = qty + excluded.qty
-        """, (str(interaction.guild.id), str(interaction.user.id), item_id, qty))
-
-        newly = []
-        if achievements_enabled(conn, interaction.guild.id):
-            r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_buy")
-            if r is not None:
-                update_wallet(conn, interaction.guild.id, interaction.user.id, r)
-                newly.append(("First Purchase", r))
-
-        conn.commit()
-
-    desc = f"You bought **{qty}x** **{item['name']}** for **{cost:,}** coins."
-    if newly:
-        desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
-    await interaction.response.send_message(embed=discord.Embed(title="Purchase complete", description=desc))
-
-@bot.tree.command(name="inventory", description="See your collectible inventory.")
-@app_commands.describe(user="Optional: view someone else's inventory")
-async def inventory(interaction: discord.Interaction, user: Optional[discord.Member] = None):
-    guild_err = require_guild(interaction)
-    if guild_err:
-        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
-
-    target = user or interaction.user
-    with db_connect() as conn:
-        rows = conn.execute("""
-            SELECT i.item_id, it.name, i.qty
-            FROM inventory i
-            JOIN items it ON it.item_id = i.item_id
-            WHERE i.guild_id=? AND i.user_id=? AND i.qty > 0
-            ORDER BY it.price ASC
-        """, (str(interaction.guild.id), str(target.id))).fetchall()
-
-    if not rows:
-        return await interaction.response.send_message(embed=discord.Embed(title="Inventory", description=f"{target.mention} has no items yet."))
-
-    lines = [f"• **{r['name']}** (`{r['item_id']}`) × **{int(r['qty'])}**" for r in rows]
-    await interaction.response.send_message(embed=discord.Embed(title="Inventory", description=f"For {target.mention}\n\n" + "\n".join(lines)))
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ----------------------------
 # LOAN COMMANDS
