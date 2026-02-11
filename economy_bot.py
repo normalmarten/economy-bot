@@ -1064,12 +1064,12 @@ SLOTS_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "💎", "👑"]
 SLOTS_WEIGHTS = [40, 30, 18, 8, 3, 1]  # totals to 100
 
 SLOTS_PAYOUT = {
-    "🍒": 2,
-    "🍋": 3,
-    "🍇": 5,
-    "🔔": 10,
-    "💎": 25,
-    "👑": 100,  # jackpot
+    "🍒": 20,
+    "🍋": 30,
+    "🍇": 50,
+    "🔔": 100,
+    "💎": 250,
+    "👑": 1000,  # jackpot
 }
 
 def slots_spin() -> List[str]:
@@ -1978,23 +1978,69 @@ async def shop(interaction: discord.Interaction):
     if guild_err:
         return await interaction.response.send_message(embed=guild_err, ephemeral=True)
 
-    with db_connect() as conn:
-        rows = conn.execute("SELECT item_id, name, price, description FROM items ORDER BY price ASC").fetchall()
+    # Always acknowledge fast to avoid "application did not respond"
+    await interaction.response.defer(ephemeral=True)
 
-    if not rows:
-        return await interaction.response.send_message(
-            embed=discord.Embed(title="Shop", description="No items yet."),
+    try:
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT item_id, name, price, description FROM items ORDER BY price ASC"
+            ).fetchall()
+
+        if not rows:
+            return await interaction.followup.send(
+                embed=discord.Embed(title="Shop", description="No items yet."),
+                ephemeral=True
+            )
+
+        pages = []
+        cur_lines = []
+        cur_len = 0
+
+        # Discord embed description hard limit is 4096 chars; keep a safety margin.
+        MAX_DESC = 3800
+
+        for r in rows:
+            line = f"**{r['item_id']}** — {r['name']} — **{int(r['price']):,}**\n_{r['description']}_"
+            add_len = len(line) + 2  # + spacing
+
+            if cur_len + add_len > MAX_DESC and cur_lines:
+                pages.append("\n\n".join(cur_lines))
+                cur_lines = [line]
+                cur_len = len(line)
+            else:
+                cur_lines.append(line)
+                cur_len += add_len
+
+        if cur_lines:
+            pages.append("\n\n".join(cur_lines))
+
+        # Send first page
+        total_pages = len(pages)
+        embed = discord.Embed(
+            title="Shop (Collectibles)",
+            description=pages[0]
+        )
+        if total_pages > 1:
+            embed.set_footer(text=f"Page 1/{total_pages} • Use /shop2 for next pages (see below)")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # Optional: send remaining pages (ephemeral allows multiple followups)
+        for i in range(1, total_pages):
+            e = discord.Embed(title="Shop (Collectibles)", description=pages[i])
+            e.set_footer(text=f"Page {i+1}/{total_pages}")
+            await interaction.followup.send(embed=e, ephemeral=True)
+
+    except Exception as e:
+        # If anything breaks, you STILL respond (so no interaction-failed)
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title="Shop Error",
+                description=f"Shop crashed:\n```{type(e).__name__}: {e}```"
+            ),
             ephemeral=True
         )
-
-    lines = []
-    for r in rows:
-        lines.append(f"**{r['item_id']}** — {r['name']} — **{int(r['price']):,}**\n_{r['description']}_")
-
-    await interaction.response.send_message(
-        embed=discord.Embed(title="Shop (Collectibles)", description="\n\n".join(lines)),
-        ephemeral=True
-    )
 
 @bot.tree.command(name="buy", description="Buy a collectible item from /shop.")
 @app_commands.describe(item_id="The item id", qty="How many to buy")
