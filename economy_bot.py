@@ -28,8 +28,7 @@ from discord.ext import commands
 # ----------------------------
 # CONFIG
 # ----------------------------
-DB_PATH = "economy.sqlite3"
-
+DB_PATH = "/app/data/economy.sqlite3"
 DAILY_AMOUNT = 250
 DAILY_COOLDOWN_SECONDS = 24 * 60 * 60  # 24h
 DAILY_STREAK_GRACE_SECONDS = 48 * 60 * 60
