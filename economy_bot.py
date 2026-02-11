@@ -67,7 +67,7 @@ SLOTS_MIN_BET = 10
 SLOTS_MAX_BET = 100_000
 
 # Loans (very high interest)
-LOAN_MAX_PRINCIPAL = 100_000
+LOAN_MAX_PRINCIPAL = 100_000_000
 LOAN_DAILY_INTEREST_PCT = 25   # 25% per day 😈
 LOAN_ORIGINATION_FEE_PCT = 10  # take 10% up front
 LOAN_GRACE_SECONDS = 24 * 60 * 60  # interest accrues daily; we compound on access
