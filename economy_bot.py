@@ -560,8 +560,7 @@ def require_guild(interaction: discord.Interaction) -> Optional[discord.Embed]:
     return None
 
 def is_admin_member(member: discord.Member) -> bool:
-    perms = member.guild_permissions
-    return perms.administrator or perms.manage_guild
+    return member.guild_permissions.administrator
 
 @bot.event
 async def on_ready():
