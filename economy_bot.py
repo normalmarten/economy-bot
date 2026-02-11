@@ -40,11 +40,11 @@ MIN_BET = 10
 MAX_BET = 100_000
 
 # Roulette (keep casino-like, not OP)
-STRAIGHT_UP_RETURN_MULT = 36  # total return (profit 35:1)
-COLOR_RETURN_MULT = 2         # total return (profit 1:1)
+STRAIGHT_UP_RETURN_MULT = 360  # total return (profit 35:1)
+COLOR_RETURN_MULT = 2.2         # total return (profit 1:1)
 
 # Optional: make losses sting more (0 disables)
-ROULETTE_LOSS_FEE_PCT = 5     # extra % of bet deducted on losses only
+ROULETTE_LOSS_FEE_PCT = 7     # extra % of bet deducted on losses only
 
 # Blackjack rules
 BJ_DEALER_STANDS_SOFT_17 = True
@@ -54,9 +54,9 @@ BJ_ALLOW_SURRENDER = True
 # - regular win: profit 1:1 (total return 2x)
 # - push: return bet
 # - natural blackjack: profit 3:2 (total return bet + 1.5*bet)
-BJ_WIN_RETURN_MULT_NUM = 2      # total return multiplier numerator (2x)
+BJ_WIN_RETURN_MULT_NUM = 3      # total return multiplier numerator (2x)
 BJ_WIN_RETURN_MULT_DEN = 1
-BJ_PUSH_RETURN_MULT_NUM = 1
+BJ_PUSH_RETURN_MULT_NUM = 2
 BJ_PUSH_RETURN_MULT_DEN = 1
 # Natural payout as fraction of bet profit: 3/2
 BJ_NATURAL_PROFIT_NUM = 3
@@ -267,37 +267,36 @@ def db_init() -> None:
 
 def seed_items(conn: sqlite3.Connection) -> None:
     items = [
-        ("collectible_01", "Monkey", 50, "collectible", "A hard worker."),
-        ("collectible_02", "Le bean", 120, "collectible", "Works harder than the monkey."),
-        ("collectible_03", "Femboy", 2500, "collectible", "Gyatt."),
-        ("collectible_04", "Tomboy", 4000, "collectible", "will bully til nut."),
-        ("collectible_05", "Goth mommy", 8000, "collectible", "Will step on you."),
-        ("collectible_06", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
-        ("collectible_07", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
-        ("collectible_08", "Chun Li", 80000, "collectible", "The guy from Fortnite."),
-        ("collectible_09", "E-Girl", 150_000, "collectible", "You are cooked gang."),
-        ("collectible_10", "Gym Bro Tren Stimmer", 275_000, "collectible", "Isaac Macklemore"),
-        ("collectible_11", "La Torta", 420_000, "collectible", "My Man."),
-        ("collectible_12", "Catboy", 750_000, "collectible", "Warning: Scratch."),
-        ("collectible_13", "CEO of Bad Dragon/Mythic Goth Mommy ", 1_200_000, "collectible", "SWEET MOTHER OF PEARL"),
-        ("collectible_14", "Mythic Discord Kitten", 2_000_000, "collectible", "Pwincess."),
-        ("collectible_15", "Kawaii Shy Anime Classmate", 3_500_000, "collectible", "Could be male or female."),
-        ("collectible_16", "Furry Overlord", 5_000_000, "collectible", "Big Dih"),
-        ("collectible_17", "Shares in Israel", 8_000_000, "collectible", "Might get some control."),
-        ("collectible_18", "Ultra Powerful Slim-Thick Asian Robot", 12_000_000, "collectible", "Connor Burton."),
-        ("collectible_19", "Twinky Little Ginger Slut", 20_000_000, "collectible", "Begley"),
-        ("collectible_20", "Ultra Mega Super Golden Mythic Goon Figurine", 50_000_000, "collectible", "yep."),
-        ("collectible_21", "Taki Fart Jar", 75_000_000, "collectible", "Spicy"),
-        ("collectible_22", "Bro", 100_000_000, "collectible", "It is your homeboy."),
-        ("collectible_23", "Waifu Body Pillow (Mythic)", 150_000_000, "collectible", ""),
-        ("collectible_24", "Lopunny", 225_000_000, "collectible", "JOKER NOOOOO"),
-        ("collectible_25", "Certified Freak Trophy", 300_000_000, "collectible", "Certified freak 7 days a week."),
-        ("collectible_26", "Goonvana Portal", 450_000_000, "collectible", "Transport yourself to goonvana."),
-        ("collectible_27", "E-Boy Vampire Overlord", 600_000_000, "collectible", "Yeah you are getting touched."),
-        ("collectible_28", "Alt Girl", 800_000_000, "collectible", "you know it"),
-        ("collectible_29", "First Date", 1_000_000_000, "collectible", "First date."),
-        ("collectible_30", "An Actual Healthy Relationship With A Woman", 2_000_000_000_000, "collectible", "Who decided that."),
-
+            ("c_001", "Monkey", 50, "collectible", "A hard worker."),
+    ("c_002", "Le bean", 120, "collectible", "Works harder than the monkey."),
+    ("c_003", "Femboy", 2500, "collectible", "Gyatt."),
+    ("c_004", "Tomboy", 4000, "collectible", "will bully til nut."),
+    ("c_005", "Goth mommy", 8000, "collectible", "Will step on you."),
+    ("c_006", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
+    ("c_007", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
+    ("c_008", "Chun Li", 80_000, "collectible", "The guy from Fortnite."),
+    ("c_009", "E-Girl", 150_000, "collectible", "You are cooked gang."),
+    ("c_010", "Gym Bro Tren Stimmer", 275_000, "collectible", "Isaac Macklemore"),
+    ("c_011", "La Torta", 420_000, "collectible", "My Man."),
+    ("c_012", "Catboy", 750_000, "collectible", "Warning: Scratch."),
+    ("c_013", "CEO of Bad Dragon/Mythic Goth Mommy", 1_200_000, "collectible", "SWEET MOTHER OF PEARL"),
+    ("c_014", "Mythic Discord Kitten", 2_000_000, "collectible", "Pwincess."),
+    ("c_015", "Kawaii Shy Anime Classmate", 3_500_000, "collectible", "Could be male or female."),
+    ("c_016", "Furry Overlord", 5_000_000, "collectible", "Big Dih"),
+    ("c_017", "Shares in Israel", 8_000_000, "collectible", "Might get some control."),
+    ("c_018", "Ultra Powerful Slim-Thick Asian Robot", 12_000_000, "collectible", "Connor Burton."),
+    ("c_019", "Twinky Little Ginger Slut", 20_000_000, "collectible", "Begley"),
+    ("c_020", "Ultra Mega Super Golden Mythic Goon Figurine", 50_000_000, "collectible", "yep."),
+    ("c_021", "Taki Fart Jar", 75_000_000, "collectible", "Spicy"),
+    ("c_022", "Bro", 100_000_000, "collectible", "It is your homeboy."),
+    ("c_023", "Waifu Body Pillow (Mythic)", 150_000_000, "collectible", ""),
+    ("c_024", "Lopunny", 225_000_000, "collectible", "JOKER NOOOOO"),
+    ("c_025", "Certified Freak Trophy", 300_000_000, "collectible", "Certified freak 7 days a week."),
+    ("c_026", "Goonvana Portal", 450_000_000, "collectible", "Transport yourself to goonvana."),
+    ("c_027", "E-Boy Vampire Overlord", 600_000_000, "collectible", "Yeah you are getting touched."),
+    ("c_028", "Alt Girl", 800_000_000, "collectible", "you know it"),
+    ("c_029", "First Date", 1_000_000_000, "collectible", "First date."),
+    ("c_030", "An Actual Healthy Relationship With A Woman", 2_000_000_000_000, "collectible", "Who decided that."),
 
     ]
     for item_id, name, price, kind, desc in items:
