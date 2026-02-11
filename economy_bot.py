@@ -261,6 +261,8 @@ def seed_items(conn: sqlite3.Connection) -> None:
         ("collectible_05", "Goth mommy", 8000, "collectible", "Will step on you."),
         ("collectible_06", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
         ("collectible_07", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
+        ("collectible_08", "Chun Li", 80000, "collectible", "The guy from Fortnite."),
+
     ]
     for item_id, name, price, kind, desc in items:
         conn.execute("""
