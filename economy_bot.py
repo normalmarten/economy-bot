@@ -1729,6 +1729,16 @@ async def holdem(interaction: discord.Interaction, ante: int):
 # ----------------------------
 # SHOP / COLLECTIBLES
 # ----------------------------
+
+def add_to_inventory(conn: sqlite3.Connection, guild_id: int, user_id: int, item_id: str, qty: int = 1) -> None:
+    conn.execute("""
+        INSERT INTO inventory (guild_id, user_id, item_id, qty)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id, item_id)
+        DO UPDATE SET qty = qty + excluded.qty
+    """, (str(guild_id), str(user_id), item_id, qty))
+
+
 @bot.tree.command(name="shop", description="View collectible items you can buy.")
 async def shop(interaction: discord.Interaction):
     guild_err = require_guild(interaction)
@@ -1742,10 +1752,7 @@ async def shop(interaction: discord.Interaction):
 
     if not rows:
         return await interaction.response.send_message(
-            embed=discord.Embed(
-                title="Shop",
-                description="No items yet."
-            ),
+            embed=discord.Embed(title="Shop", description="No items available."),
             ephemeral=True
         )
 
@@ -1761,6 +1768,82 @@ async def shop(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="buy", description="Buy a collectible item from the shop.")
+@app_commands.describe(item_id="The item_id from /shop", qty="How many to buy (default 1)")
+async def buy(interaction: discord.Interaction, item_id: str, qty: Optional[int] = 1):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    item_id = item_id.strip()
+    qty = 1 if qty is None else qty
+
+    if qty <= 0 or qty > 100:
+        return await interaction.response.send_message(
+            embed=discord.Embed(title="Buy", description="qty must be between 1 and 100."),
+            ephemeral=True
+        )
+
+    with db_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        item = conn.execute(
+            "SELECT item_id, name, price FROM items WHERE item_id=?",
+            (item_id,)
+        ).fetchone()
+
+        if not item:
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(title="Buy", description="Invalid item_id. Use /shop."),
+                ephemeral=True
+            )
+
+        price = int(item["price"])
+        total = price * qty
+
+        u = get_user(conn, interaction.guild.id, interaction.user.id)
+        wallet = int(u["wallet"])
+
+        if total > wallet:
+            conn.rollback()
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="Not enough coins",
+                    description=f"Cost: **{total:,}**\nYou have: **{wallet:,}**"
+                ),
+                ephemeral=True
+            )
+
+        update_wallet(conn, interaction.guild.id, interaction.user.id, -total)
+        add_to_inventory(conn, interaction.guild.id, interaction.user.id, item_id, qty)
+
+        newly = []
+        if achievements_enabled(conn, interaction.guild.id):
+            r = unlock_achievement(conn, interaction.guild.id, interaction.user.id, "first_buy")
+            if r is not None:
+                update_wallet(conn, interaction.guild.id, interaction.user.id, r)
+                newly.append(("First Purchase", r))
+
+        new_wallet = int(get_user(conn, interaction.guild.id, interaction.user.id)["wallet"])
+        conn.commit()
+
+    desc = (
+        f"Bought **{qty}× {item['name']}** (`{item_id}`)\n"
+        f"Cost: **{total:,}**\n"
+        f"Balance: **{new_wallet:,}**"
+    )
+
+    if newly:
+        desc += "\n\n🏆 **Achievement unlocked:** " + ", ".join([f"{n} (+{r:,})" for n, r in newly])
+
+    await interaction.response.send_message(
+        embed=discord.Embed(title="Purchase complete", description=desc),
+        ephemeral=True
+    )
+
 
 @bot.tree.command(name="inventory", description="See your collectible inventory.")
 @app_commands.describe(user="Optional: view someone else's inventory")
@@ -1789,7 +1872,10 @@ async def inventory(interaction: discord.Interaction, user: Optional[discord.Mem
             ephemeral=True
         )
 
-    lines = [f"• **{r['name']}** (`{r['item_id']}`) × **{int(r['qty'])}**" for r in rows]
+    lines = [
+        f"• **{r['name']}** (`{r['item_id']}`) × **{int(r['qty'])}**"
+        for r in rows
+    ]
 
     await interaction.response.send_message(
         embed=discord.Embed(
