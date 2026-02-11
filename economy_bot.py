@@ -1762,6 +1762,42 @@ async def shop(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="inventory", description="See your collectible inventory.")
+@app_commands.describe(user="Optional: view someone else's inventory")
+async def inventory(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    guild_err = require_guild(interaction)
+    if guild_err:
+        return await interaction.response.send_message(embed=guild_err, ephemeral=True)
+
+    target = user or interaction.user
+
+    with db_connect() as conn:
+        rows = conn.execute("""
+            SELECT i.item_id, it.name, i.qty
+            FROM inventory i
+            JOIN items it ON it.item_id = i.item_id
+            WHERE i.guild_id=? AND i.user_id=? AND i.qty > 0
+            ORDER BY it.price ASC
+        """, (str(interaction.guild.id), str(target.id))).fetchall()
+
+    if not rows:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title="Inventory",
+                description=f"{target.mention} has no items yet."
+            ),
+            ephemeral=True
+        )
+
+    lines = [f"• **{r['name']}** (`{r['item_id']}`) × **{int(r['qty'])}**" for r in rows]
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Inventory",
+            description=f"For {target.mention}\n\n" + "\n".join(lines)
+        ),
+        ephemeral=True
+    )
 # ----------------------------
 # LOAN COMMANDS
 # ----------------------------
