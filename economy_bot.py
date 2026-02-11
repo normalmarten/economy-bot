@@ -41,7 +41,7 @@ MAX_BET = 100_000
 
 # Roulette (keep casino-like, not OP)
 STRAIGHT_UP_RETURN_MULT = 36  # total return (profit 35:1)
-COLOR_RETURN_MULT = 3         # total return (profit 1:1)
+COLOR_RETURN_MULT = 2         # total return (profit 1:1)
 
 # Optional: make losses sting more (0 disables)
 ROULETTE_LOSS_FEE_PCT = 5     # extra % of bet deducted on losses only
