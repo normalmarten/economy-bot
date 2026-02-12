@@ -2167,7 +2167,7 @@ async def buy(interaction: discord.Interaction, item_id: str, qty: int = 1):
     if guild_err:
         return await interaction.response.send_message(embed=guild_err, ephemeral=True)
 
-    if qty < 1 or qty > 99:
+    if qty < 1 or qty > 100_000_000:
         return await interaction.response.send_message(embed=discord.Embed(title="Invalid qty", description="Qty must be 1–99."), ephemeral=True)
 
     item_id = item_id.strip()
