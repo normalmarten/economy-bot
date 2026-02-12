@@ -2507,57 +2507,163 @@ async def leaderboard(interaction: discord.Interaction, category: Optional[app_c
         description="\n".join(lines) + f"\n\nYour rank: **#{my_rank}**",
     ))
 
-gift = app_commands.Group(name="gift", description="Gift coins or items to another user.")
+# ----------------------------
+# GIFT COMMANDS (coins/items) - supports members, roles, @everyone
+# ----------------------------
+from typing import Union, Optional
+import discord
+from discord import app_commands
+
+# Safety limits (prevents accidentally gifting 10k people)
+MAX_GIFT_TARGETS = 25          # max recipients when gifting to role/everyone
+MAX_TOTAL_COIN_GIFT = 250_000  # max total coins in one role/everyone gift
+
+gift = app_commands.Group(name="gift", description="Gift coins or items to another user (or role/@everyone).")
 bot.tree.add_command(gift)
 
-@gift.command(name="coins", description="Gift coins to another user.")
-@app_commands.describe(user="Who to gift to", amount="How many coins")
-async def gift_coins(interaction: discord.Interaction, user: discord.Member, amount: int):
+def _is_everyone_role(role: discord.Role) -> bool:
+    # @everyone role has the same ID as the guild
+    return role.is_default()
+
+def _eligible_members_from_target(
+    interaction: discord.Interaction,
+    target: Union[discord.Member, discord.Role],
+) -> list[discord.Member]:
+    """Return eligible recipients (no bots, not sender)."""
+    if isinstance(target, discord.Member):
+        members = [target]
+    else:
+        # Role (including @everyone)
+        if _is_everyone_role(target):
+            members = list(interaction.guild.members)
+        else:
+            members = list(target.members)
+
+    out: list[discord.Member] = []
+    for m in members:
+        if m.bot:
+            continue
+        if m.id == interaction.user.id:
+            continue
+        out.append(m)
+
+    # Remove duplicates just in case
+    uniq = {}
+    for m in out:
+        uniq[m.id] = m
+    return list(uniq.values())
+
+@gift.command(name="coins", description="Gift coins to a user or to a role/@everyone (per-person).")
+@app_commands.describe(
+    target="Who to gift to (member, role, or @everyone)",
+    amount="How many coins per person"
+)
+async def gift_coins(
+    interaction: discord.Interaction,
+    target: Union[discord.Member, discord.Role],
+    amount: int
+):
     guild_err = require_guild(interaction)
     if guild_err:
         return await interaction.response.send_message(embed=guild_err, ephemeral=True)
 
-    if user.bot:
-        return await interaction.response.send_message("You can't gift coins to bots.", ephemeral=True)
-    if user.id == interaction.user.id:
-        return await interaction.response.send_message("You can't gift yourself.", ephemeral=True)
     if amount <= 0:
         return await interaction.response.send_message("Amount must be positive.", ephemeral=True)
 
+    recipients = _eligible_members_from_target(interaction, target)
+    if not recipients:
+        return await interaction.response.send_message("No valid recipients found (bots/self excluded).", ephemeral=True)
+
+    # Safety cap for role/@everyone gifts
+    if isinstance(target, discord.Role) and len(recipients) > MAX_GIFT_TARGETS:
+        return await interaction.response.send_message(
+            f"That target includes **{len(recipients)}** members. "
+            f"Max allowed for mass gifts is **{MAX_GIFT_TARGETS}**.",
+            ephemeral=True
+        )
+
+    total = amount * len(recipients)
+    if isinstance(target, discord.Role) and total > MAX_TOTAL_COIN_GIFT:
+        return await interaction.response.send_message(
+            f"That would gift a total of **{total:,}** coins. "
+            f"Max allowed total per mass gift is **{MAX_TOTAL_COIN_GIFT:,}**.",
+            ephemeral=True
+        )
+
     with db_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
+
         sender = get_user(conn, interaction.guild.id, interaction.user.id)
         bal = int(sender["wallet"])
-        if amount > bal:
+
+        if total > bal:
             conn.rollback()
             return await interaction.response.send_message(
-                embed=discord.Embed(title="Not enough coins", description=f"You have **{bal:,}** coins."),
+                embed=discord.Embed(
+                    title="Not enough coins",
+                    description=f"You have **{bal:,}** coins but need **{total:,}** to gift {len(recipients)} recipient(s)."
+                ),
                 ephemeral=True
             )
 
-        update_wallet(conn, interaction.guild.id, interaction.user.id, -amount)
-        update_wallet(conn, interaction.guild.id, user.id, amount)
+        # subtract total from sender
+        update_wallet(conn, interaction.guild.id, interaction.user.id, -total)
+
+        # add to each recipient
+        for m in recipients:
+            update_wallet(conn, interaction.guild.id, m.id, amount)
+
         conn.commit()
 
+    # Pretty target label
+    if isinstance(target, discord.Member):
+        target_label = target.mention
+    else:
+        target_label = target.mention  # role mention (@everyone works too)
+
     await interaction.response.send_message(
-        embed=discord.Embed(title="Gift Sent", description=f"You gifted **{amount:,}** coins to {user.mention}.")
+        embed=discord.Embed(
+            title="Gift Sent",
+            description=(
+                f"You gifted **{amount:,}** coins to **{len(recipients)}** recipient(s) in {target_label}.\n"
+                f"Total: **{total:,}** coins."
+            )
+        )
     )
 
-@gift.command(name="item", description="Gift a collectible item to another user.")
-@app_commands.describe(user="Who to gift to", item_id="Item id to gift", qty="How many")
-async def gift_item(interaction: discord.Interaction, user: discord.Member, item_id: str, qty: int = 1):
+@gift.command(name="item", description="Gift a collectible item to a user or to a role/@everyone (per-person).")
+@app_commands.describe(
+    target="Who to gift to (member, role, or @everyone)",
+    item_id="Item id to gift",
+    qty="How many per person (1–99)"
+)
+async def gift_item(
+    interaction: discord.Interaction,
+    target: Union[discord.Member, discord.Role],
+    item_id: str,
+    qty: int = 1
+):
     guild_err = require_guild(interaction)
     if guild_err:
         return await interaction.response.send_message(embed=guild_err, ephemeral=True)
 
-    if user.bot:
-        return await interaction.response.send_message("You can't gift items to bots.", ephemeral=True)
-    if user.id == interaction.user.id:
-        return await interaction.response.send_message("You can't gift yourself.", ephemeral=True)
     if qty < 1 or qty > 99:
         return await interaction.response.send_message("Qty must be 1–99.", ephemeral=True)
 
     item_id = item_id.strip()
+    recipients = _eligible_members_from_target(interaction, target)
+    if not recipients:
+        return await interaction.response.send_message("No valid recipients found (bots/self excluded).", ephemeral=True)
+
+    # Safety cap for role/@everyone gifts
+    if isinstance(target, discord.Role) and len(recipients) > MAX_GIFT_TARGETS:
+        return await interaction.response.send_message(
+            f"That target includes **{len(recipients)}** members. "
+            f"Max allowed for mass gifts is **{MAX_GIFT_TARGETS}**.",
+            ephemeral=True
+        )
+
+    total_qty = qty * len(recipients)
 
     with db_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -2566,6 +2672,7 @@ async def gift_item(interaction: discord.Interaction, user: discord.Member, item
         if not item:
             conn.rollback()
             return await interaction.response.send_message("That item_id doesn't exist.", ephemeral=True)
+
         if str(item["kind"]) != "collectible":
             conn.rollback()
             return await interaction.response.send_message("Only collectibles can be gifted.", ephemeral=True)
@@ -2576,28 +2683,30 @@ async def gift_item(interaction: discord.Interaction, user: discord.Member, item
         """, (str(interaction.guild.id), str(interaction.user.id), item_id)).fetchone()
 
         have_qty = int(have["qty"]) if have else 0
-        if qty > have_qty:
+        if total_qty > have_qty:
             conn.rollback()
             return await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Not enough items",
-                    description=f"You only have **{have_qty}x** of `{item_id}`."
+                    description=f"You have **{have_qty}x** of `{item_id}` but need **{total_qty}x** to gift {len(recipients)} recipient(s)."
                 ),
                 ephemeral=True
             )
 
-        # subtract from sender
+        # subtract from sender (total)
         conn.execute("""
             UPDATE inventory SET qty = qty - ?
             WHERE guild_id=? AND user_id=? AND item_id=?
-        """, (qty, str(interaction.guild.id), str(interaction.user.id), item_id))
+        """, (total_qty, str(interaction.guild.id), str(interaction.user.id), item_id))
 
-        # add to receiver
-        conn.execute("""
-            INSERT INTO inventory (guild_id, user_id, item_id, qty)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id, item_id) DO UPDATE SET qty = qty + excluded.qty
-        """, (str(interaction.guild.id), str(user.id), item_id, qty))
+        # add to each recipient
+        for m in recipients:
+            conn.execute("""
+                INSERT INTO inventory (guild_id, user_id, item_id, qty)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id, item_id)
+                DO UPDATE SET qty = qty + excluded.qty
+            """, (str(interaction.guild.id), str(m.id), item_id, qty))
 
         # cleanup zero rows
         conn.execute("""
@@ -2607,13 +2716,20 @@ async def gift_item(interaction: discord.Interaction, user: discord.Member, item
 
         conn.commit()
 
+    if isinstance(target, discord.Member):
+        target_label = target.mention
+    else:
+        target_label = target.mention
+
     await interaction.response.send_message(
         embed=discord.Embed(
             title="Gift Sent",
-            description=f"You gifted **{qty}x** **{item['name']}** (`{item_id}`) to {user.mention}."
+            description=(
+                f"You gifted **{qty}x** **{item['name']}** (`{item_id}`) to **{len(recipients)}** recipient(s) in {target_label}.\n"
+                f"Total items sent: **{total_qty}x**."
+            )
         )
     )
-
 
 # ----------------------------
 # ADMIN COMMANDS
