@@ -267,43 +267,74 @@ def db_init() -> None:
 
 def seed_items(conn: sqlite3.Connection) -> None:
     items = [
-	("c_001", "Monkey", 50, "collectible", "A hard worker."),
-	("c_002", "Le bean", 120, "collectible", "Works harder than the monkey."),
-	("c_003", "Femboy", 2500, "collectible", "Gyatt."),
-	("c_004", "Tomboy", 4000, "collectible", "will bully til nut."),
-	("c_005", "Goth mommy", 8000, "collectible", "Will step on you."),
-	("c_006", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
-	("c_007", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
-	("c_008", "Chun Li", 40_000, "collectible", "The guy from Fortnite."),
-	("c_009", "E-Girl", 75_000, "collectible", "You are cooked gang."),
-	("c_010", "Gym Bro Tren Stimmer", 125_000, "collectible", "Isaac Macklemore"),
-	("c_011", "La Torta", 200_000, "collectible", "My Man."),
-	("c_012", "Catboy", 325_000, "collectible", "Warning: Scratch."),
-	("c_013", "CEO of Bad Dragon/Mythic Goth Mommy", 500_000, "collectible", "SWEET MOTHER OF PEARL"),
-	("c_014", "Mythic Discord Kitten", 750_000, "collectible", "Pwincess."),
-	("c_015", "Kawaii Shy Anime Classmate", 1_200_000, "collectible", "Could be male or female."),
-	("c_016", "Furry Overlord", 2_000_000, "collectible", "Big Dih"),
-	("c_017", "Shares in Israel", 3_000_000, "collectible", "Might get some control."),
-	("c_018", "Ultra Powerful Slim-Thick Asian Robot", 5_000_000, "collectible", "Connor Burton."),
-	("c_019", "Twinky Little Ginger Slut", 8_000_000, "collectible", "Begley"),
-	("c_020", "Ultra Mega Super Golden Mythic Goon Figurine", 12_000_000, "collectible", "yep."),
-	("c_021", "Taki Fart Jar", 18_000_000, "collectible", "Spicy"),
-	("c_022", "Bro", 25_000_000, "collectible", "It is your homeboy."),
-	("c_023", "Waifu Body Pillow (Mythic)", 40_000_000, "collectible", ""),
-	("c_024", "Lopunny", 60_000_000, "collectible", "JOKER NOOOOO"),
-	("c_025", "Certified Freak Trophy", 85_000_000, "collectible", "Certified freak 7 days a week."),
-	("c_026", "Goonvana Portal", 120_000_000, "collectible", "Transport yourself to goonvana."),
-	("c_027", "E-Boy Vampire Overlord", 175_000_000, "collectible", "Yeah you are getting touched."),
-	("c_028", "Alt Girl", 250_000_000, "collectible", "you know it"),
-	("c_029", "First Date", 1_000_000_000, "collectible", "First date."),
-	("c_030", "An Actual Healthy Relationship With A Woman", 2_000_000_000_000, "collectible", "Who decided that."),
-
+        ("c_001", "Monkey", 50, "collectible", "A hard worker."),
+        ("c_002", "Le bean", 120, "collectible", "Works harder than the monkey."),
+        ("c_003", "Femboy", 2500, "collectible", "Gyatt."),
+        ("c_004", "Tomboy", 4000, "collectible", "will bully til nut."),
+        ("c_005", "Goth mommy", 8000, "collectible", "Will step on you."),
+        ("c_006", "Goth Furry Tomboy", 8000, "collectible", "PAWS."),
+        ("c_007", "Anthropomorphic Alligator", 8000, "collectible", "Look at me Dom."),
+        ("c_008", "Chun Li", 40_000, "collectible", "The guy from Fortnite."),
+        ("c_009", "E-Girl", 75_000, "collectible", "You are cooked gang."),
+        ("c_010", "Gym Bro Tren Stimmer", 125_000, "collectible", "Isaac Macklemore"),
+        ("c_011", "La Torta", 200_000, "collectible", "My Man."),
+        ("c_012", "Catboy", 325_000, "collectible", "Warning: Scratch."),
+        ("c_013", "CEO of Bad Dragon/Mythic Goth Mommy", 500_000, "collectible", "SWEET MOTHER OF PEARL"),
+        ("c_014", "Mythic Discord Kitten", 750_000, "collectible", "Pwincess."),
+        ("c_015", "Kawaii Shy Anime Classmate", 1_200_000, "collectible", "Could be male or female."),
+        ("c_016", "Furry Overlord", 2_000_000, "collectible", "Big Dih"),
+        ("c_017", "Shares in Israel", 3_000_000, "collectible", "Might get some control."),
+        ("c_018", "Ultra Powerful Slim-Thick Asian Robot", 5_000_000, "collectible", "Connor Burton."),
+        ("c_019", "Twinky Little Ginger Slut", 8_000_000, "collectible", "Begley"),
+        ("c_020", "Ultra Mega Super Golden Mythic Goon Figurine", 12_000_000, "collectible", "yep."),
+        ("c_021", "Taki Fart Jar", 18_000_000, "collectible", "Spicy"),
+        ("c_022", "Bro", 25_000_000, "collectible", "It is your homeboy."),
+        ("c_023", "Waifu Body Pillow (Mythic)", 40_000_000, "collectible", ""),
+        ("c_024", "Lopunny", 60_000_000, "collectible", "JOKER NOOOOO"),
+        ("c_025", "Certified Freak Trophy", 85_000_000, "collectible", "Certified freak 7 days a week."),
+        ("c_026", "Goonvana Portal", 120_000_000, "collectible", "Transport yourself to goonvana."),
+        ("c_027", "E-Boy Vampire Overlord", 175_000_000, "collectible", "Yeah you are getting touched."),
+        ("c_028", "Alt Girl", 250_000_000, "collectible", "you know it"),
+        ("c_029", "First Date", 1_000_000_000, "collectible", "First date."),
+        ("c_030", "An Actual Healthy Relationship With A Woman", 2_000_000_000_000, "collectible", "Who decided that."),
     ]
+
+    # normal seed (adds missing items only)
     for item_id, name, price, kind, desc in items:
         conn.execute("""
             INSERT OR IGNORE INTO items (item_id, name, price, kind, description)
             VALUES (?, ?, ?, ?, ?)
         """, (item_id, name, price, kind, desc))
+
+    # --- FORCE PRICE UPDATES for existing rows ---
+    UPDATED_PRICES = {
+        "c_008": 40_000,
+        "c_009": 75_000,
+        "c_010": 125_000,
+        "c_011": 200_000,
+        "c_012": 325_000,
+        "c_013": 500_000,
+        "c_014": 750_000,
+        "c_015": 1_200_000,
+        "c_016": 2_000_000,
+        "c_017": 3_000_000,
+        "c_018": 5_000_000,
+        "c_019": 8_000_000,
+        "c_020": 12_000_000,
+        "c_021": 18_000_000,
+        "c_022": 25_000_000,
+        "c_023": 40_000_000,
+        "c_024": 60_000_000,
+        "c_025": 85_000_000,
+        "c_026": 120_000_000,
+        "c_027": 175_000_000,
+        "c_028": 250_000_000,
+        # c_029 and c_030 intentionally NOT included (two most expensive stay unchanged)
+    }
+
+    for item_id, new_price in UPDATED_PRICES.items():
+        conn.execute("UPDATE items SET price = ? WHERE item_id = ?", (new_price, item_id))
+
     conn.commit()
 
 def seed_achievements(conn: sqlite3.Connection) -> None:
