@@ -876,7 +876,7 @@ async def beg(interaction: discord.Interaction):
             return await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Beg",
-                    description="You have enough, play for more coins."
+                    description="You have enough, play for more coins you little goy."
                 ),
                 ephemeral=True
             )
@@ -891,7 +891,7 @@ async def beg(interaction: discord.Interaction):
                     title="Beg",
                     description=(
                         f"**HAHA!** You're **super greedy**.\n"
-                        f"\"I only have so many coins to give, be more grateful and do better in the games.\" \n\n"
+                        f"\"I only have so many coins to give, be more grateful goy and do better in the games.\" \n\n"
                         f"Try again in **{mins}m {secs}s**."
                     )
                 ),
@@ -906,7 +906,7 @@ async def beg(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=discord.Embed(
             title="Beg",
-            description=f"Yes, grovel for coins\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
+            description=f"Yes, grovel for coins you little goy\n\nYou received **{BEG_PAYOUT:,}** coins.\nBalance: **{new_wallet:,}**"
         )
     )
 
