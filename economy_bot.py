@@ -1642,6 +1642,34 @@ class HoldemHUView(discord.ui.View):
         self.user_id = user_id
         self.game_id = game_id
 
+    # ---------- UI helpers ----------
+    @staticmethod
+    def _fmt(n: int) -> str:
+        return f"{int(n):,}"
+
+    def _primary_hint(self, game: HoldemHU) -> str:
+        if game.to_call_player > 0:
+            return f"Call {self._fmt(game.to_call_player)} / Raise / Fold"
+        return "Check / Bet / Fold"
+
+    def _sync_buttons(self, game: HoldemHU, wallet: Optional[int] = None) -> None:
+        """Update button labels + disabled state to match the current street."""
+        if wallet is None:
+            wallet = self._get_player_wallet(self.guild_id, self.user_id)
+
+        # dynamic labels
+        if game.to_call_player > 0:
+            self.check_call.label = f"Call ({self._fmt(game.to_call_player)})"
+            self.bet_raise.label = "Raise"
+        else:
+            self.check_call.label = "Check"
+            self.bet_raise.label = "Bet"
+
+        # basic safety disables (prevents pointless clicks)
+        self.check_call.disabled = bool(game.done) or (game.to_call_player > wallet)
+        self.bet_raise.disabled = bool(game.done) or (wallet <= 0)
+        self.fold.disabled = bool(game.done)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your Hold'em game.", ephemeral=True)
@@ -1662,23 +1690,52 @@ class HoldemHUView(discord.ui.View):
             return None
         return game
 
-    def _render(self, game: HoldemHU, reveal_bot: bool = False) -> discord.Embed:
+    def _render(self, game: HoldemHU, reveal_bot: bool = False, wallet_override: Optional[int] = None) -> discord.Embed:
         comm = _community_for_stage(game.full_board, game.stage)
-        board_text = " ".join(comm) if comm else "_(none yet)_"
+        board_text = " ".join(comm) if comm else "—"
+
         ph = " ".join(game.player_hole)
         bh = " ".join(game.bot_hole) if reveal_bot else "?? ??"
 
-        embed = discord.Embed(title="Texas Hold'em — You vs Bot")
+        wallet = wallet_override if wallet_override is not None else self._get_player_wallet(self.guild_id, self.user_id)
+
+        # Color by state
+        if game.done:
+            color = discord.Color.dark_gray()
+        elif game.to_call_player > 0:
+            color = discord.Color.gold()
+        else:
+            color = discord.Color.green()
+
+        embed = discord.Embed(
+            title="Texas Hold'em — Heads-Up vs Bot",
+            color=color
+        )
+
+        # Top status row
         embed.add_field(name="Stage", value=_stage_name(game.stage), inline=True)
-        embed.add_field(name="Pot", value=f"**{game.pot:,}**", inline=True)
-        embed.add_field(name="To Call (You)", value=f"**{game.to_call_player:,}**", inline=True)
+        embed.add_field(name="Pot", value=f"**{self._fmt(game.pot)}**", inline=True)
+        embed.add_field(name="Your Stack", value=f"**{self._fmt(wallet)}**", inline=True)
 
-        embed.add_field(name="Board", value=f"**{board_text}**", inline=False)
-        embed.add_field(name="Your Hole", value=f"**{ph}**", inline=True)
-        embed.add_field(name="Bot Hole", value=f"**{bh}**", inline=True)
+        # Action / commitment row
+        embed.add_field(name="To Call", value=f"**{self._fmt(game.to_call_player)}**", inline=True)
+        embed.add_field(name="You Invested", value=f"**{self._fmt(game.invested_player)}**", inline=True)
+        embed.add_field(name="Bot Invested", value=f"**{self._fmt(game.invested_bot)}**", inline=True)
 
+        # Cards
+        embed.add_field(name="Board", value=f"`{board_text}`", inline=False)
+        embed.add_field(name="Your Hole", value=f"`{ph}`", inline=True)
+        embed.add_field(name="Bot Hole", value=f"`{bh}`", inline=True)
+
+        # Footer prompt / last action
+        hint = self._primary_hint(game)
         if game.last_action:
-            embed.set_footer(text=game.last_action)
+            embed.set_footer(text=f"{game.last_action} • {hint}")
+        else:
+            embed.set_footer(text=hint)
+
+        # keep buttons in sync with what render shows
+        self._sync_buttons(game, wallet=wallet)
 
         return embed
 
@@ -1745,6 +1802,9 @@ class HoldemHUView(discord.ui.View):
                     update_wallet(conn, interaction.guild.id, interaction.user.id, r)
             conn.commit()
 
+        # Fetch FINAL balance after payout + stats rewards
+        final_wallet = self._get_player_wallet(interaction.guild.id, interaction.user.id)
+
         game.done = True
 
         active_id = HE_HU_ACTIVE_BY_USER.get(key)
@@ -1754,11 +1814,19 @@ class HoldemHUView(discord.ui.View):
 
         self.clear_items()
 
-        embed = self._render(game, reveal_bot=True)
+        # Build end screen
+        embed = self._render(game, reveal_bot=True, wallet_override=final_wallet)
 
-        net_text = f"+{net:,}" if net >= 0 else f"{net:,}"
-        result = "➖ Push." if player_won is None else ("✅ You win!" if player_won else "❌ You lose.")
-        embed.description = f"{note}\n\n{result} Net: **{net_text}**"
+        net_text = f"+{self._fmt(net)}" if net >= 0 else f"{self._fmt(net)}"
+        result = "Push" if player_won is None else ("You win" if player_won else "You lose")
+
+        embed.description = (
+            f"**{note}**\n"
+            f"Result: **{result}**\n"
+            f"Net: **{net_text}**\n"
+            f"Final Balance: **{self._fmt(final_wallet)}**"
+        )
+
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def _resolve_showdown(self, interaction: discord.Interaction, game: HoldemHU):
@@ -1784,7 +1852,7 @@ class HoldemHUView(discord.ui.View):
         if decision == "call":
             game.pot += game.to_call_bot
             game.invested_bot += game.to_call_bot
-            game.last_action = f"Bot called **{game.to_call_bot:,}**."
+            game.last_action = f"Bot called {self._fmt(game.to_call_bot)}."
             game.to_call_bot = 0
             game.to_call_player = 0
 
@@ -1792,7 +1860,7 @@ class HoldemHUView(discord.ui.View):
             game.last_action = "Bot checked."
 
         elif decision == "raise":
-            # FIX: Bot cannot raise more than the player can actually cover (prevents forced folds)
+            # Bot cannot raise more than the player can cover (prevents forced folds)
             player_wallet = self._get_player_wallet(interaction.guild.id, interaction.user.id)
 
             base_pot = max(1, game.pot)
@@ -1807,7 +1875,7 @@ class HoldemHUView(discord.ui.View):
                 if game.to_call_bot > 0:
                     game.pot += game.to_call_bot
                     game.invested_bot += game.to_call_bot
-                    game.last_action = f"Bot called **{game.to_call_bot:,}**."
+                    game.last_action = f"Bot called {self._fmt(game.to_call_bot)}."
                     game.to_call_bot = 0
                     game.to_call_player = 0
                 else:
@@ -1820,12 +1888,12 @@ class HoldemHUView(discord.ui.View):
                 game.to_call_bot = 0
 
                 game.to_call_player = raise_amt
-                game.last_action = f"Bot raised. You must call **{raise_amt:,}** or fold."
+                game.last_action = f"Bot raised. To call: {self._fmt(raise_amt)}."
 
         if game.to_call_player == 0 and game.to_call_bot == 0:
             if game.stage < 3:
                 self._next_stage(game)
-                game.last_action += " | Dealt next card(s)."
+                game.last_action += " | Next street dealt."
             else:
                 game.stage = 4
 
@@ -1856,11 +1924,11 @@ class HoldemHUView(discord.ui.View):
 
             game.to_call_bot = amount
             game.to_call_player = 0
-            game.last_action = f"You bet/raised **{total:,}** (raise amount **{amount:,}**)."
+            game.last_action = f"You raised to {self._fmt(total)} (raise {self._fmt(amount)})."
 
             await self._bot_act(interaction, game)
 
-    @discord.ui.button(label="Check / Call", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Check", style=discord.ButtonStyle.success)
     async def check_call(self, interaction: discord.Interaction, _: discord.ui.Button):
         key = (interaction.guild.id, interaction.user.id)
         async with _he_lock_for(key):
@@ -1876,7 +1944,7 @@ class HoldemHUView(discord.ui.View):
 
                 game.pot += need
                 game.invested_player += need
-                game.last_action = f"You called **{need:,}**."
+                game.last_action = f"You called {self._fmt(need)}."
                 game.to_call_player = 0
                 game.to_call_bot = 0
             else:
